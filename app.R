@@ -98,6 +98,11 @@ standardize_group_code <- function(x) {
     x_up,
     dplyr::case_when(
 
+      # --- Non-polymer guard: obvious non-plastic materials → NA
+      # Fires when a non-polymer keyword is present and no polymer cue overrides it.
+      stringr::str_detect(x_up, "\\bOIL\\b|\\bGUM\\b|\\bRESIN\\b|\\bOXIDE\\b|\\bPHOSPHATE\\b|\\bSTEARATE\\b|\\bSALT\\b|\\bMICA\\b|\\bQUARTZ\\b|\\bTITANIUM\\b|\\bPIGMENT\\b|\\bPARAFFIN\\b") &
+        !stringr::str_detect(x_up, "\\bPOLY|\\bEVOH\\b|\\bPVAC\\b|\\bEPDM\\b|\\bNYLON\\b") ~ NA_character_,
+
       # --- Chlorinated polyethylene (must be before generic PE)
       x_up %in% c("PE-CL", "PECL", "CPE") ~ "PE-Cl",
       stringr::str_detect(x, stringr::regex("polyethylene\\s*chlor", ignore_case = TRUE)) ~ "PE-Cl",
@@ -111,6 +116,29 @@ standardize_group_code <- function(x) {
       # --- PET (must be before generic PE)
       x_up == "PET" ~ "PET",
       stringr::str_detect(x, stringr::regex("poly(ethylene\\s*)?tereph", ignore_case = TRUE)) ~ "PET",
+
+      # --- EVOH → PVA (ethylene-vinyl alcohol copolymer; before generic PE)
+      x_up == "EVOH" ~ "PVA",
+      stringr::str_detect(x, stringr::regex("\\bEVOH\\b", ignore_case = TRUE)) ~ "PVA",
+      stringr::str_detect(x, stringr::regex("ethylene\\s*vinyl\\s*alcohol", ignore_case = TRUE)) ~ "PVA",
+      stringr::str_detect(x, stringr::regex("vinyl\\s*alcohol\\s*copolymer", ignore_case = TRUE)) ~ "PVA",
+
+      # --- EPDM / ethylene-propylene-diene rubber → IR (elastomer bucket; before generic PE/PP)
+      x_up %in% c("EPDM", "EPR") ~ "IR",
+      stringr::str_detect(x, stringr::regex("\\bEPDM\\b", ignore_case = TRUE)) ~ "IR",
+      stringr::str_detect(x, stringr::regex("ethylene\\s*[:/-]\\s*propylene\\s*[:/-]\\s*diene", ignore_case = TRUE)) ~ "IR",
+      stringr::str_detect(x, stringr::regex("ethylene\\s*propylene\\s*diene", ignore_case = TRUE)) ~ "IR",
+
+      # --- Masterbatch / Film: classify only when an explicit polymer is identifiable
+      # These rules must precede the broad poly* patterns to prevent mis-classification.
+      stringr::str_detect(x_up, "MASTERBATCH|\\bFILM\\b") &
+        stringr::str_detect(x, stringr::regex("ethylene.*vinyl.*acet|poly\\[ethylene.*vinyl\\s*acetate", ignore_case = TRUE)) ~ "EVA",
+      stringr::str_detect(x_up, "MASTERBATCH|\\bFILM\\b") &
+        stringr::str_detect(x, stringr::regex("polyethy", ignore_case = TRUE)) ~ "PE",
+      stringr::str_detect(x_up, "MASTERBATCH|\\bFILM\\b") &
+        stringr::str_detect(x, stringr::regex("polyprop", ignore_case = TRUE)) ~ "PP",
+      stringr::str_detect(x_up, "MASTERBATCH|\\bFILM\\b") &
+        stringr::str_detect(x, stringr::regex("polystyr", ignore_case = TRUE)) ~ "PS",
 
       # --- Generic PE LAST so it doesn't capture PEN / PET / PE-Cl
       stringr::str_starts(x, stringr::regex("PolyEthylen", ignore_case = TRUE)) ~ "PE",
@@ -163,12 +191,24 @@ standardize_group_code <- function(x) {
       stringr::str_starts(x, stringr::regex("Polyacrilonitrile", ignore_case = TRUE)) ~ "PAN",
       stringr::str_detect(x, stringr::regex("acrylonitrile", ignore_case = TRUE)) ~ "PAN",
 
+      # --- PCL → PLA (polycaprolactone; biodegradable polyester, closest available group)
+      x_up == "PCL" ~ "PLA",
+      stringr::str_detect(x, stringr::regex("\\bpolycaprolactone\\b", ignore_case = TRUE)) ~ "PLA",
+      stringr::str_detect(x, stringr::regex("\\bPCL\\b", ignore_case = TRUE)) ~ "PLA",
+
       # --- PLA
       x_up == "PLA" ~ "PLA",
       stringr::str_detect(x, stringr::regex("polylact", ignore_case = TRUE)) ~ "PLA",
 
+      # --- PVAc → PVA (poly(vinyl acetate); same vinyl backbone, closest available group)
+      x_up == "PVAC" ~ "PVA",
+      stringr::str_detect(x, stringr::regex("\\bPVAC\\b", ignore_case = TRUE)) ~ "PVA",
+      stringr::str_detect(x, stringr::regex("poly\\s*\\(\\s*vinyl\\s*acetate\\s*\\)", ignore_case = TRUE)) ~ "PVA",
+      stringr::str_detect(x, stringr::regex("polyvinyl\\s*acetate", ignore_case = TRUE)) ~ "PVA",
+
       # --- PVA
       x_up == "PVA" ~ "PVA",
+      stringr::str_detect(x, stringr::regex("poly\\s*\\(\\s*vinyl\\s*alcohol\\s*\\)", ignore_case = TRUE)) ~ "PVA",
       stringr::str_detect(x, stringr::regex("polyvinyl\\s*alcohol", ignore_case = TRUE)) ~ "PVA",
 
       # --- EVA
