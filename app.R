@@ -127,28 +127,28 @@ standardize_group_code <- function(x) {
       # --- PA
       x_up == "PA"  ~ "PA",
       stringr::str_detect(x, stringr::regex("polyamid", ignore_case = TRUE))    ~ "PA",
-      stringr::str_detect(x, stringr::regex("nylon\s*[-_]?\s*6[,\.]?6|\bnylon\b", ignore_case = TRUE)) ~ "PA",
+      stringr::str_detect(x, stringr::regex("nylon\\s*[-_]?\\s*6[,\\.]?6|\\bnylon\\b", ignore_case = TRUE)) ~ "PA",
 
       # --- PET / copolyesters
       x_up == "PETG" ~ "PET",
-      stringr::str_detect(x, stringr::regex("\bpetg\b", ignore_case = TRUE)) ~ "PET",
+      stringr::str_detect(x, stringr::regex("\\bpetg\\b", ignore_case = TRUE)) ~ "PET",
 
       # --- EVA / related notation
-      stringr::str_detect(x, stringr::regex("ethylene\s*[/:-]\s*vinyl\s*acet", ignore_case = TRUE)) ~ "EVA",
+      stringr::str_detect(x, stringr::regex("ethylene\\s*[/:-]\\s*vinyl\\s*acet", ignore_case = TRUE)) ~ "EVA",
 
       # --- PE copolymer shorthand
       x_up == "EMAA" ~ "PE",
-      stringr::str_detect(x, stringr::regex("ethylene\s*methacrylic\s*acid", ignore_case = TRUE)) ~ "PE",
+      stringr::str_detect(x, stringr::regex("ethylene\\s*methacrylic\\s*acid", ignore_case = TRUE)) ~ "PE",
 
       # --- Vinyl chloride copolymers
-      stringr::str_detect(x, stringr::regex("vinyl\s*chloride\s*[/:-]\s*vinyl\s*acet", ignore_case = TRUE)) ~ "PVC",
+      stringr::str_detect(x, stringr::regex("vinyl\\s*chloride\\s*[/:-]\\s*vinyl\\s*acet", ignore_case = TRUE)) ~ "PVC",
 
       # --- Methacrylate polymers
-      stringr::str_detect(x, stringr::regex("poly\s*\(\s*n[- ]?butyl\s*methacrylate\s*\)", ignore_case = TRUE)) ~ "PMMA",
+      stringr::str_detect(x, stringr::regex("poly\\s*\\(\\s*n[- ]?butyl\\s*methacrylate\\s*\\)", ignore_case = TRUE)) ~ "PMMA",
 
       # --- Polyolefin variants
-      stringr::str_detect(x, stringr::regex("poly\s*\(\s*4[- ]?methyl[- ]?1[- ]?pentene\s*\)", ignore_case = TRUE)) ~ "PP",
-      stringr::str_detect(x, stringr::regex("polypropylene\s*isotactic\s*chlorinated", ignore_case = TRUE)) ~ "PP",
+      stringr::str_detect(x, stringr::regex("poly\\s*\\(\\s*4[- ]?methyl[- ]?1[- ]?pentene\\s*\\)", ignore_case = TRUE)) ~ "PP",
+      stringr::str_detect(x, stringr::regex("polypropylene\\s*isotactic\\s*chlorinated", ignore_case = TRUE)) ~ "PP",
 
       # --- PVC
       x_up == "PVC" ~ "PVC",
