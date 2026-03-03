@@ -341,6 +341,14 @@ parse_num_any <- function(x) {
 }
 
 
+make_material_mapping_table <- function(df, raw_col, mapped_col) {
+  mapping <- unique(df[, c(raw_col, mapped_col)])
+  names(mapping) <- c("raw_material_name", "standardized_group")
+  mapping <- mapping[order(mapping$raw_material_name, na.last = TRUE), ]
+  rownames(mapping) <- NULL
+  mapping
+}
+
 # ---------------------------
 # FT-IR workflow (existing)
 # ---------------------------
@@ -481,6 +489,7 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   dfs <- lapply(input_paths, read_one_csv_ftir)
   long_df <- dplyr::bind_rows(dfs)
 
+  mapping_df <- make_material_mapping_table(long_df, "group_raw", "group_mapped")
   long_df <- long_df %>% dplyr::select(-c(group_raw, group_mapped, group_code, feret_um, mass_ng))
 
   all_A <- list()
@@ -589,6 +598,11 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   safeWriteTable(wb, "Summary", fix_colnames_for_excel(total_C), startRow = r2, startCol = 1)
 
   setColWidths(wb, "Summary", cols = 1:max(ncol(total_A), ncol(total_B), ncol(total_C)), widths = 10)
+
+  addWorksheet(wb, "Material_Mapping")
+  safeWriteTable(wb, "Material_Mapping", fix_colnames_for_excel(mapping_df))
+  setColWidths(wb, "Material_Mapping", cols = 1, widths = 50)
+  setColWidths(wb, "Material_Mapping", cols = 2, widths = 20)
 
   saveWorkbook(wb, output_path, overwrite = TRUE)
   output_path
@@ -794,6 +808,7 @@ make_pivots_raman <- function(df_one, src_override = NULL) {
 write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 70) {
   dfs <- lapply(input_paths, read_one_csv_raman, hqi_cutoff = hqi_cutoff)
   long_df <- dplyr::bind_rows(dfs)
+  mapping_df <- make_material_mapping_table(long_df, "material_raw", "material_mapped")
   long_df <- fix_colnames_for_excel(long_df)
 
   all_A <- list()
@@ -889,6 +904,11 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   r2 <- r2 + 1
   safeWriteTable(wb, "Summary", mean_B, startRow = r2, startCol = 1)
   setColWidths(wb, "Summary", cols = 1:max(ncol(mean_A), ncol(mean_B)), widths = 10)
+
+  addWorksheet(wb, "Material_Mapping")
+  safeWriteTable(wb, "Material_Mapping", fix_colnames_for_excel(mapping_df))
+  setColWidths(wb, "Material_Mapping", cols = 1, widths = 50)
+  setColWidths(wb, "Material_Mapping", cols = 2, widths = 20)
 
   addWorksheet(wb, "Unknown_Materials")
   safeWriteTable(wb, "Unknown_Materials", unknown_all)
