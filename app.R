@@ -552,14 +552,57 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
     ","
   }
 
-  raw_df <- readr::read_delim(
-    file = path,
-    delim = delim,
-    show_col_types = FALSE,
-    locale = readr::locale(encoding = "UTF-8"),
-    progress = FALSE,
-    trim_ws = TRUE
-  )
+  try_read <- function(enc) {
+    readr::read_delim(
+      file = path,
+      delim = delim,
+      show_col_types = FALSE,
+      locale = readr::locale(encoding = enc),
+      progress = FALSE,
+      trim_ws = TRUE
+    )
+  }
+
+  candidates <- c("UTF-8", "UTF-16LE", "UTF-16BE", "Windows-1252", "Latin1")
+  dfs <- list()
+  scores <- numeric(length(candidates))
+
+  for (i in seq_along(candidates)) {
+    enc <- candidates[[i]]
+    df_i <- tryCatch(try_read(enc), error = function(e) NULL)
+    if (is.null(df_i)) {
+      scores[i] <- -Inf
+      next
+    }
+
+    cn <- names(df_i)
+    if (is.null(cn)) {
+      scores[i] <- -Inf
+      next
+    }
+
+    cn_utf8 <- iconv(cn, from = "", to = "UTF-8", sub = "byte")
+    names(df_i) <- cn_utf8
+
+    suppressWarnings({
+      has_micro <- any(grepl("µ", cn_utf8, fixed = TRUE)) || any(grepl("μ", cn_utf8, fixed = TRUE))
+      has_repl <- any(grepl("\uFFFD", cn_utf8))
+      has_bytes <- any(grepl("<[0-9A-Fa-f]{2}>", cn_utf8, perl = TRUE))
+    })
+
+    scores[i] <- (has_micro * 5) - (has_repl * 100) - (has_bytes * 20)
+    dfs[[i]] <- df_i
+  }
+
+  best_i <- which.max(scores)
+  raw_df <- dfs[[best_i]]
+  if (is.null(raw_df) || !is.finite(scores[best_i])) {
+    stop(
+      "Could not read Raman CSV reliably (encoding/header issue) for file: ", basename(path), "\n",
+      "Tried encodings: ", paste(candidates, collapse = ", "), "\n",
+      "Tip: export as UTF-8/UTF-16 CSV with headers."
+    )
+  }
 
   raw_names <- names(raw_df)
   if (is.null(raw_names)) {
@@ -616,8 +659,8 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
     dplyr::mutate(
       particle_name = if (!is.na(col_particle)) as.character(.data[[col_particle]]) else NA_character_,
       material_raw = as.character(.data[[col_material]]),
-      hqi_value_raw = readr::parse_number(as.character(.data[[col_hqi]])),
-      feret_max_um_raw = readr::parse_number(as.character(.data[[col_feret]])),
+      hqi_value_raw = parse_num_any(.data[[col_hqi]]),
+      feret_max_um_raw = parse_num_any(.data[[col_feret]]),
       source_file = basename(path)
     )
 
