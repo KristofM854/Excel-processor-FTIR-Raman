@@ -561,7 +561,14 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
     trim_ws = TRUE
   )
 
-  names(raw_df) <- janitor::clean_names(names(raw_df), replace = c("µ" = "u", "μ" = "u"))
+  raw_names <- names(raw_df)
+  if (is.null(raw_names)) {
+    stop(
+      "Raman CSV has no header row (NULL column names) in file: ", basename(path), "\n",
+      "Please re-export with column headers enabled."
+    )
+  }
+  names(raw_df) <- janitor::make_clean_names(raw_names, replace = c("µ" = "u", "μ" = "u"))
 
   pick_col <- function(candidates, patterns) {
     exact_hit <- intersect(candidates, names(raw_df))
