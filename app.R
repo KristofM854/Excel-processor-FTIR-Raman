@@ -27,11 +27,55 @@ sanitize_sheet_name <- function(x) {
   substr(x, 1, 31)
 }
 
-sanitize_excel_colnames <- function(nm) {
-  nm2 <- gsub("[^A-Za-z0-9_]+", "_", nm)
-  nm2 <- gsub("_+", "_", nm2)
-  nm2 <- gsub("^_|_$", "", nm2)
-  make.unique(nm2, sep = "_")
+fix_colnames_for_excel <- function(df) {
+  df <- as.data.frame(df)
+  nm <- names(df)
+  if (is.null(nm)) stop("NULL column names detected")
+
+  bad <- is.na(nm) | nm == ""
+  if (any(bad)) nm[bad] <- paste0("col_", which(bad))
+
+  nm <- gsub("[^A-Za-z0-9_]+", "_", nm)
+  nm <- gsub("_+", "_", nm)
+  nm <- gsub("^_|_$", "", nm)
+  nm <- make.unique(nm, sep = "_")
+
+  names(df) <- nm
+  df
+}
+
+validate_schema <- function(df, required_cols, context = "data frame") {
+  missing <- setdiff(required_cols, names(df))
+  if (length(missing) > 0) {
+    stop(
+      "Missing required columns in ", context, ": ", paste(missing, collapse = ", "), "\n",
+      "Columns present: ", paste(names(df), collapse = ", ")
+    )
+  }
+  invisible(TRUE)
+}
+
+safeWriteTable <- function(wb, sheet, x, ...) {
+  x <- fix_colnames_for_excel(x)
+  tryCatch(
+    openxlsx::writeDataTable(wb, sheet, x, ...),
+    error = function(e) stop("writeDataTable failed on sheet: ", sheet, "\n", conditionMessage(e))
+  )
+}
+
+preflight_table <- function(df, table_name) {
+  nm <- names(df)
+  if (is.null(nm)) stop("Preflight failed [", table_name, "]: NULL column names")
+  if (anyDuplicated(nm) > 0) stop("Preflight failed [", table_name, "]: duplicated column names")
+  if (any(is.na(nm) | nm == "")) stop("Preflight failed [", table_name, "]: NA/empty column names")
+
+  data.frame(
+    table = table_name,
+    n_rows = nrow(df),
+    n_cols = ncol(df),
+    status = "OK",
+    stringsAsFactors = FALSE
+  )
 }
 
 GROUP_ORDER <- c(
@@ -83,6 +127,28 @@ standardize_group_code <- function(x) {
       # --- PA
       x_up == "PA"  ~ "PA",
       stringr::str_detect(x, stringr::regex("polyamid", ignore_case = TRUE))    ~ "PA",
+      stringr::str_detect(x, stringr::regex("nylon\s*[-_]?\s*6[,\.]?6|\bnylon\b", ignore_case = TRUE)) ~ "PA",
+
+      # --- PET / copolyesters
+      x_up == "PETG" ~ "PET",
+      stringr::str_detect(x, stringr::regex("\bpetg\b", ignore_case = TRUE)) ~ "PET",
+
+      # --- EVA / related notation
+      stringr::str_detect(x, stringr::regex("ethylene\s*[/:-]\s*vinyl\s*acet", ignore_case = TRUE)) ~ "EVA",
+
+      # --- PE copolymer shorthand
+      x_up == "EMAA" ~ "PE",
+      stringr::str_detect(x, stringr::regex("ethylene\s*methacrylic\s*acid", ignore_case = TRUE)) ~ "PE",
+
+      # --- Vinyl chloride copolymers
+      stringr::str_detect(x, stringr::regex("vinyl\s*chloride\s*[/:-]\s*vinyl\s*acet", ignore_case = TRUE)) ~ "PVC",
+
+      # --- Methacrylate polymers
+      stringr::str_detect(x, stringr::regex("poly\s*\(\s*n[- ]?butyl\s*methacrylate\s*\)", ignore_case = TRUE)) ~ "PMMA",
+
+      # --- Polyolefin variants
+      stringr::str_detect(x, stringr::regex("poly\s*\(\s*4[- ]?methyl[- ]?1[- ]?pentene\s*\)", ignore_case = TRUE)) ~ "PP",
+      stringr::str_detect(x, stringr::regex("polypropylene\s*isotactic\s*chlorinated", ignore_case = TRUE)) ~ "PP",
 
       # --- PVC
       x_up == "PVC" ~ "PVC",
@@ -384,7 +450,7 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   wb <- createWorkbook()
 
   addWorksheet(wb, "Long_Table")
-  writeDataTable(wb, "Long_Table", long_df)
+  safeWriteTable(wb, "Long_Table", fix_colnames_for_excel(long_df))
   setColWidths(wb, "Long_Table", cols = 1:min(30, ncol(long_df)), widths = 10)
 
   for (i in seq_along(dfs)) {
@@ -411,19 +477,19 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
 
     writeData(wb, sheet_name, "A) Counts per plastic type", startRow = r, startCol = 1)
     r <- r + 1
-    writeDataTable(wb, sheet_name, piv$count_by_group, startRow = r, startCol = 1)
+    safeWriteTable(wb, sheet_name, fix_colnames_for_excel(piv$count_by_group), startRow = r, startCol = 1)
     r <- r + nrow(piv$count_by_group) + 3
 
     writeData(wb, sheet_name, "B) Counts per size class", startRow = r, startCol = 1)
     r <- r + 1
-    writeDataTable(wb, sheet_name, piv$count_by_feret, startRow = r, startCol = 1)
+    safeWriteTable(wb, sheet_name, fix_colnames_for_excel(piv$count_by_feret), startRow = r, startCol = 1)
     r <- r + nrow(piv$count_by_feret) + 3
 
     writeData(wb, sheet_name, "C) Total Mass [ng] per plastic type", startRow = r, startCol = 1)
     r <- r + 1
-    writeDataTable(wb, sheet_name, piv$mass_by_group, startRow = r, startCol = 1)
+    safeWriteTable(wb, sheet_name, fix_colnames_for_excel(piv$mass_by_group), startRow = r, startCol = 1)
 
-    setColWidths(wb, sheet_name, cols = 1:80, widths = 10)
+    setColWidths(wb, sheet_name, cols = 1:max(ncol(piv$count_by_group), ncol(piv$count_by_feret), ncol(piv$mass_by_group)), widths = 10)
   }
 
   summary_A <- dplyr::bind_rows(all_A)
@@ -440,7 +506,7 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   writeData(wb, "Total", "A) Counts per plastic type", startRow = rr, startCol = 1)
   rr <- rr + 1
   start_A <- rr
-  writeDataTable(wb, "Total", summary_A, startRow = rr, startCol = 1)
+  safeWriteTable(wb, "Total", fix_colnames_for_excel(summary_A), startRow = rr, startCol = 1)
   row_A_total <- start_A + which(summary_A$source_file == "Total")
   addStyle(wb, "Total", total_row_style, rows = row_A_total, cols = 1:ncol(summary_A), gridExpand = TRUE, stack = TRUE)
   rr <- rr + nrow(summary_A) + 3
@@ -448,7 +514,7 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   writeData(wb, "Total", "B) Counts per size class", startRow = rr, startCol = 1)
   rr <- rr + 1
   start_B <- rr
-  writeDataTable(wb, "Total", summary_B, startRow = rr, startCol = 1)
+  safeWriteTable(wb, "Total", fix_colnames_for_excel(summary_B), startRow = rr, startCol = 1)
   row_B_total <- start_B + which(summary_B$source_file == "Total")
   addStyle(wb, "Total", total_row_style, rows = row_B_total, cols = 1:ncol(summary_B), gridExpand = TRUE, stack = TRUE)
   rr <- rr + nrow(summary_B) + 3
@@ -456,11 +522,11 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   writeData(wb, "Total", "C) Total mass [ng] per plastic type", startRow = rr, startCol = 1)
   rr <- rr + 1
   start_C <- rr
-  writeDataTable(wb, "Total", summary_C, startRow = rr, startCol = 1)
+  safeWriteTable(wb, "Total", fix_colnames_for_excel(summary_C), startRow = rr, startCol = 1)
   row_C_total <- start_C + which(summary_C$source_file == "Total")
   addStyle(wb, "Total", total_row_style, rows = row_C_total, cols = 1:ncol(summary_C), gridExpand = TRUE, stack = TRUE)
 
-  setColWidths(wb, "Total", cols = 1:80, widths = 10)
+  setColWidths(wb, "Total", cols = 1:max(ncol(summary_A), ncol(summary_B), ncol(summary_C)), widths = 10)
 
   total_A <- summary_A %>% dplyr::filter(source_file == "Total")
   total_B <- summary_B %>% dplyr::filter(source_file == "Total")
@@ -470,19 +536,19 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   r2 <- 1
   writeData(wb, "Summary", "A) Total counts per plastic type", startRow = r2, startCol = 1)
   r2 <- r2 + 1
-  writeDataTable(wb, "Summary", total_A, startRow = r2, startCol = 1)
+  safeWriteTable(wb, "Summary", fix_colnames_for_excel(total_A), startRow = r2, startCol = 1)
   r2 <- r2 + nrow(total_A) + 3
 
   writeData(wb, "Summary", "B) Total counts per size class", startRow = r2, startCol = 1)
   r2 <- r2 + 1
-  writeDataTable(wb, "Summary", total_B, startRow = r2, startCol = 1)
+  safeWriteTable(wb, "Summary", fix_colnames_for_excel(total_B), startRow = r2, startCol = 1)
   r2 <- r2 + nrow(total_B) + 3
 
   writeData(wb, "Summary", "C) Total mass [ng] per plastic type", startRow = r2, startCol = 1)
   r2 <- r2 + 1
-  writeDataTable(wb, "Summary", total_C, startRow = r2, startCol = 1)
+  safeWriteTable(wb, "Summary", fix_colnames_for_excel(total_C), startRow = r2, startCol = 1)
 
-  setColWidths(wb, "Summary", cols = 1:80, widths = 10)
+  setColWidths(wb, "Summary", cols = 1:max(ncol(total_A), ncol(total_B), ncol(total_C)), widths = 10)
 
   saveWorkbook(wb, output_path, overwrite = TRUE)
   output_path
@@ -498,18 +564,16 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
 # - Feret max [um] (size metric)
 # - HQI (quality index) for filtering
 read_one_csv_raman <- function(path, hqi_cutoff = 70) {
-  
-  # --- Detect delimiter (many Raman exports use ';' with European locales)
+
   first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
   delim <- if (length(first_line) && grepl(";", first_line, fixed = TRUE) && !grepl(",", first_line, fixed = TRUE)) {
     ";"
   } else if (length(first_line) && grepl(";", first_line, fixed = TRUE) && grepl(",", first_line, fixed = TRUE)) {
-    # pick the one with more occurrences
     if (stringr::str_count(first_line, fixed(";")) >= stringr::str_count(first_line, fixed(","))) ";" else ","
   } else {
     ","
   }
-  
+
   try_read <- function(enc) {
     readr::read_delim(
       file = path,
@@ -520,12 +584,11 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
       trim_ws = TRUE
     )
   }
- 
-  # NOTE: drop UTF-8-BOM
+
   candidates <- c("UTF-8", "UTF-16LE", "UTF-16BE", "Windows-1252", "Latin1")
   dfs <- list()
   scores <- numeric(length(candidates))
-  
+
   for (i in seq_along(candidates)) {
     enc <- candidates[[i]]
     df_i <- tryCatch(try_read(enc), error = function(e) NULL)
@@ -533,83 +596,115 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
       scores[i] <- -Inf
       next
     }
-    
-    # --- Long-term fix: normalize column names once
+
     cn <- names(df_i)
+    if (is.null(cn)) {
+      scores[i] <- -Inf
+      next
+    }
+
     cn_utf8 <- iconv(cn, from = "", to = "UTF-8", sub = "byte")
     names(df_i) <- cn_utf8
-    cn <- cn_utf8
-    
+
     suppressWarnings({
-      has_micro <- any(grepl("µ", cn, fixed = TRUE))
-      has_repl  <- any(grepl("\uFFFD", cn))
+      has_micro <- any(grepl("µ", cn_utf8, fixed = TRUE)) || any(grepl("μ", cn_utf8, fixed = TRUE))
+      has_repl <- any(grepl("\uFFFD", cn_utf8))
+      has_bytes <- any(grepl("<[0-9A-Fa-f]{2}>", cn_utf8, perl = TRUE))
     })
-    
-    scores[i] <- (has_micro * 5) - (has_repl * 100)
+
+    scores[i] <- (has_micro * 5) - (has_repl * 100) - (has_bytes * 20)
     dfs[[i]] <- df_i
   }
-  
+
   best_i <- which.max(scores)
-  df <- dfs[[best_i]]
-  
-  if (is.null(df) || !is.finite(scores[best_i]) || scores[best_i] < 0) {
+  raw_df <- dfs[[best_i]]
+  if (is.null(raw_df) || !is.finite(scores[best_i])) {
     stop(
       "Could not read Raman CSV reliably (encoding/header issue) for file: ", basename(path), "\n",
-      "Tip: export again as CSV (',' or ';' delimited) and check encoding (UTF-16LE is common)."
+      "Tried encodings: ", paste(candidates, collapse = ", "), "\n",
+      "Tip: export as UTF-8/UTF-16 CSV with headers."
     )
   }
-  
-  # Flexible header matching
-  cn_raw <- names(df)
-  
-  cn_clean <- janitor::make_clean_names(
-    cn_raw,
-    replace = c("µ" = "u", "μ" = "u")
-  )
-  
-  pick_col <- function(patterns) {
-    hit <- which(vapply(patterns, function(p) any(grepl(p, cn_clean)), logical(1)))
-    if (length(hit) == 0) return(NA_character_)
-    pat <- patterns[[hit[[1]]]]
-    idx <- which(grepl(pat, cn_clean))[1]
-    cn_raw[[idx]]
+
+  raw_names <- names(raw_df)
+  if (is.null(raw_names)) {
+    stop(
+      "Raman CSV has no header row (NULL column names) in file: ", basename(path), "\n",
+      "Please re-export with column headers enabled."
+    )
   }
-  
-  col_material <- pick_col(c("(^|_)material($|_)", "(^|_)polymer($|_)", "(^|_)plastic($|_)", "(^|_)group($|_)"))
-  col_feretmax <- pick_col(c("feret.*max", "max.*feret", "feret_max"))
-  col_hqi      <- pick_col(c("(^|_)hqi($|_)", "hq_index", "quality.*index", "quality"))
-  
-  missing <- c()
-  if (is.na(col_material)) missing <- c(missing, "Material")
-  if (is.na(col_feretmax)) missing <- c(missing, "Feret max [um]")
-  if (is.na(col_hqi))      missing <- c(missing, "HQI")
-  
-  if (length(missing) > 0) {
+  names(raw_df) <- janitor::make_clean_names(raw_names, replace = c("µ" = "u", "μ" = "u"))
+
+  pick_col <- function(candidates, patterns) {
+    exact_hit <- intersect(candidates, names(raw_df))
+    if (length(exact_hit) > 0) return(exact_hit[[1]])
+
+    for (pat in patterns) {
+      idx <- which(grepl(pat, names(raw_df)))[1]
+      if (!is.na(idx)) return(names(raw_df)[[idx]])
+    }
+    NA_character_
+  }
+
+  col_particle <- pick_col(
+    c("particle_name", "particle", "identifier", "id", "name"),
+    c("particle", "identifier", "^id$", "name")
+  )
+  col_material <- pick_col(
+    c("material", "polymer", "plastic", "group"),
+    c("(^|_)material($|_)", "(^|_)polymer($|_)", "(^|_)plastic($|_)", "(^|_)group($|_)")
+  )
+  col_hqi <- pick_col(
+    c("hqi", "hq_index", "quality_index", "quality"),
+    c("(^|_)hqi($|_)", "hq_index", "quality.*index", "quality")
+  )
+  col_feret <- pick_col(
+    c("feret_max_um", "feret_max", "max_feret", "feret"),
+    c("feret.*max", "max.*feret", "feret_max")
+  )
+
+  detected_required <- c(
+    material_raw = col_material,
+    hqi_value_raw = col_hqi,
+    feret_max_um_raw = col_feret
+  )
+  if (any(is.na(detected_required))) {
+    missing <- names(detected_required)[is.na(detected_required)]
     stop(
       "Raman CSV is missing required columns in file: ", basename(path), "\n",
-      "Missing: ", paste(missing, collapse = ", "), "\n",
-      "Columns present: ", paste(cn_raw, collapse = ", "), "\n",
-      "If your headers differ, rename them to include: 'Material', 'Feret max', 'HQI'."
+      "Missing canonical fields: ", paste(missing, collapse = ", "), "\n",
+      "Columns present: ", paste(names(raw_df), collapse = ", ")
     )
   }
-  
+
+  df <- raw_df %>%
+    dplyr::mutate(
+      particle_name = if (!is.na(col_particle)) as.character(.data[[col_particle]]) else NA_character_,
+      material_raw = as.character(.data[[col_material]]),
+      hqi_value_raw = parse_num_any(.data[[col_hqi]]),
+      feret_max_um_raw = parse_num_any(.data[[col_feret]]),
+      source_file = basename(path)
+    )
+
+  validate_schema(
+    df,
+    required_cols = c("particle_name", "material_raw", "hqi_value_raw", "feret_max_um_raw", "source_file"),
+    context = paste0("Raman file ", basename(path))
+  )
+
   df <- df %>%
     dplyr::mutate(
-      material_raw  = stringr::str_trim(as.character(.data[[col_material]])),
+      material_raw = stringr::str_trim(as.character(material_raw)),
       material_mapped = standardize_group_code(material_raw),
-      # Keep ALL unique materials: only abbreviate when we have a mapped code
-      group_code    = dplyr::if_else(is.na(material_mapped) | material_mapped == "", material_raw, material_mapped),
-      feret_max_um_raw = parse_num_any(.data[[col_feretmax]]),
-      hqi_value_raw    = parse_num_any(.data[[col_hqi]]),
-      # Some instruments export HQI as 0-1; convert to 0-100 if needed
-      hqi_value         = dplyr::if_else(!is.na(hqi_value_raw) & hqi_value_raw <= 1, hqi_value_raw * 100, hqi_value_raw),
-      feret_max_um      = feret_max_um_raw,
-      source_file       = basename(path)
+      group_code = dplyr::if_else(is.na(material_mapped) | material_mapped == "", "OTHER", material_mapped),
+      hqi_value = dplyr::if_else(!is.na(hqi_value_raw) & hqi_value_raw <= 1, hqi_value_raw * 100, hqi_value_raw),
+      feret_max_um = feret_max_um_raw
     ) %>%
     dplyr::filter(!is.na(hqi_value) & hqi_value >= hqi_cutoff)
-  
+
   df
 }
+
 
 make_pivots_raman <- function(df_one, src_override = NULL) {
 
@@ -622,72 +717,54 @@ make_pivots_raman <- function(df_one, src_override = NULL) {
     }
   }
 
-  # If all rows were filtered out (e.g., HQI cutoff too high), still create a valid 1-row pivot filled with zeros
-  if (nrow(df_one) == 0) {
-    pA <- as.data.frame(matrix(0, nrow = 1, ncol = length(GROUP_ORDER)))
-    names(pA) <- GROUP_ORDER
-    pA$source_file <- src
-    pA <- pA[, c("source_file", GROUP_ORDER), drop = FALSE]
+  group_levels <- c(GROUP_ORDER, "OTHER")
 
-    pB <- as.data.frame(matrix(0, nrow = 1, ncol = length(FERET_BINS)))
-    names(pB) <- FERET_BINS
-    pB$source_file <- src
-    pB <- pB[, c("source_file", FERET_BINS), drop = FALSE]
-
-    return(list(count_by_group = pA, count_by_feret = pB))
-  }
-
-  pA <- df_one %>%
-    dplyr::filter(!is.na(group_code)) %>%
-    dplyr::group_by(group_code) %>%
-    dplyr::summarise(value = dplyr::n(), .groups = "drop") %>%
-    tidyr::pivot_wider(
-      names_from = group_code,
-      values_from = value,
-      values_fill = 0
-    ) %>%
+  count_by_group <- df_one %>%
+    dplyr::mutate(group_code = dplyr::if_else(is.na(group_code) | group_code == "", "OTHER", group_code)) %>%
+    dplyr::count(group_code, name = "value") %>%
+    dplyr::mutate(group_code = factor(group_code, levels = group_levels)) %>%
+    tidyr::complete(group_code = factor(group_levels, levels = group_levels), fill = list(value = 0)) %>%
+    tidyr::pivot_wider(names_from = group_code, values_from = value, values_fill = 0) %>%
     dplyr::mutate(source_file = src, .before = 1)
+  count_by_group <- ensure_cols_in_order(count_by_group, group_levels, id_col = "source_file")
 
-  pA <- ensure_cols_in_order(pA, GROUP_ORDER, id_col = "source_file")
-
-  pB <- df_one %>%
+  count_by_feret <- df_one %>%
     dplyr::mutate(
       feret_bin = bin_feret(feret_max_um),
       feret_bin = factor(feret_bin, levels = FERET_BINS)
     ) %>%
-    dplyr::group_by(feret_bin) %>%
-    dplyr::summarise(value = dplyr::n(), .groups = "drop") %>%
-    tidyr::complete(
-      feret_bin = factor(FERET_BINS, levels = FERET_BINS),
-      fill = list(value = 0)
-    ) %>%
-    tidyr::pivot_wider(
-      names_from = feret_bin,
-      values_from = value,
-      values_fill = 0
-    ) %>%
+    dplyr::count(feret_bin, name = "value") %>%
+    tidyr::complete(feret_bin = factor(FERET_BINS, levels = FERET_BINS), fill = list(value = 0)) %>%
+    tidyr::pivot_wider(names_from = feret_bin, values_from = value, values_fill = 0) %>%
     dplyr::mutate(source_file = src, .before = 1)
+  count_by_feret <- ensure_cols_in_order(count_by_feret, FERET_BINS, id_col = "source_file")
 
-  pB <- ensure_cols_in_order(pB, FERET_BINS, id_col = "source_file")
+  unknown_materials_long <- df_one %>%
+    dplyr::filter(is.na(material_mapped) | material_mapped == "") %>%
+    dplyr::select(source_file, particle_name, material_raw, hqi_value, feret_max_um)
 
   list(
-    count_by_group = pA,
-    count_by_feret = pB
+    count_by_group = count_by_group,
+    count_by_feret = count_by_feret,
+    unknown_materials_long = unknown_materials_long
   )
 }
+
 
 write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 70) {
   dfs <- lapply(input_paths, read_one_csv_raman, hqi_cutoff = hqi_cutoff)
   long_df <- dplyr::bind_rows(dfs)
+  long_df <- fix_colnames_for_excel(long_df)
 
   all_A <- list()
   all_B <- list()
+  all_unknown <- list()
 
   wb <- createWorkbook()
 
   addWorksheet(wb, "Long_Table")
-  writeDataTable(wb, "Long_Table", long_df)
-  setColWidths(wb, "Long_Table", cols = 1:min(30, ncol(long_df)), widths = 10)
+  safeWriteTable(wb, "Long_Table", long_df)
+  setColWidths(wb, "Long_Table", cols = 1:ncol(long_df), widths = 10)
 
   for (i in seq_along(dfs)) {
     df_one <- dfs[[i]]
@@ -702,42 +779,44 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
     }
 
     piv <- make_pivots_raman(df_one, src_override = basename(input_paths[[i]]))
+    piv$count_by_group <- fix_colnames_for_excel(piv$count_by_group)
+    piv$count_by_feret <- fix_colnames_for_excel(piv$count_by_feret)
+    piv$unknown_materials_long <- fix_colnames_for_excel(piv$unknown_materials_long)
 
     all_A[[i]] <- piv$count_by_group
     all_B[[i]] <- piv$count_by_feret
+    all_unknown[[i]] <- piv$unknown_materials_long
 
     addWorksheet(wb, sheet_name)
-    
-    names(piv$count_by_group) <- sanitize_excel_colnames(names(piv$count_by_group))
-    names(piv$count_by_feret) <- sanitize_excel_colnames(names(piv$count_by_feret))
 
     r <- 1
     writeData(wb, sheet_name, "A) Counts per plastic type", startRow = r, startCol = 1)
     r <- r + 1
-    writeDataTable(wb, sheet_name, piv$count_by_group, startRow = r, startCol = 1)
+    safeWriteTable(wb, sheet_name, piv$count_by_group, startRow = r, startCol = 1)
     r <- r + nrow(piv$count_by_group) + 3
 
     writeData(wb, sheet_name, "B) Counts per size class", startRow = r, startCol = 1)
     r <- r + 1
-    writeDataTable(wb, sheet_name, piv$count_by_feret, startRow = r, startCol = 1)
+    safeWriteTable(wb, sheet_name, piv$count_by_feret, startRow = r, startCol = 1)
 
-    setColWidths(wb, sheet_name, cols = 1:80, widths = 10)
+    setColWidths(wb, sheet_name, cols = 1:max(ncol(piv$count_by_group), ncol(piv$count_by_feret)), widths = 10)
   }
 
   summary_A <- dplyr::bind_rows(all_A)
   summary_B <- dplyr::bind_rows(all_B)
+  unknown_all <- dplyr::bind_rows(all_unknown)
 
-  # Total sheet: rbind of each file sheet, plus Total row
-  summary_A <- add_total_row(summary_A, id_col = "source_file", label = "Total")
-  summary_B <- add_total_row(summary_B, id_col = "source_file", label = "Total")
-  
+  summary_A <- fix_colnames_for_excel(add_total_row(summary_A, id_col = "source_file", label = "Total"))
+  summary_B <- fix_colnames_for_excel(add_total_row(summary_B, id_col = "source_file", label = "Total"))
+  unknown_all <- fix_colnames_for_excel(unknown_all)
+
   addWorksheet(wb, "Total")
   rr <- 1
 
   writeData(wb, "Total", "A) Counts per plastic type", startRow = rr, startCol = 1)
   rr <- rr + 1
   start_A <- rr
-  writeDataTable(wb, "Total", summary_A, startRow = rr, startCol = 1)
+  safeWriteTable(wb, "Total", summary_A, startRow = rr, startCol = 1)
   row_A_total <- start_A + which(summary_A$source_file == "Total")
   addStyle(wb, "Total", total_row_style, rows = row_A_total, cols = 1:ncol(summary_A), gridExpand = TRUE, stack = TRUE)
   rr <- rr + nrow(summary_A) + 3
@@ -745,39 +824,54 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   writeData(wb, "Total", "B) Counts per size class", startRow = rr, startCol = 1)
   rr <- rr + 1
   start_B <- rr
-  writeDataTable(wb, "Total", summary_B, startRow = rr, startCol = 1)
+  safeWriteTable(wb, "Total", summary_B, startRow = rr, startCol = 1)
   row_B_total <- start_B + which(summary_B$source_file == "Total")
   addStyle(wb, "Total", total_row_style, rows = row_B_total, cols = 1:ncol(summary_B), gridExpand = TRUE, stack = TRUE)
+  setColWidths(wb, "Total", cols = 1:max(ncol(summary_A), ncol(summary_B)), widths = 10)
 
-  setColWidths(wb, "Total", cols = 1:80, widths = 10)
-
-  # Summary: mean across files (excluding Total row) + also show Total
   mean_A <- summary_A %>% dplyr::filter(source_file != "Total")
   mean_B <- summary_B %>% dplyr::filter(source_file != "Total")
 
-  mean_A <- add_mean_row(mean_A, id_col = "source_file", label = "Mean")
-  mean_B <- add_mean_row(mean_B, id_col = "source_file", label = "Mean")
+  mean_A <- fix_colnames_for_excel(add_mean_row(mean_A, id_col = "source_file", label = "Mean"))
+  mean_B <- fix_colnames_for_excel(add_mean_row(mean_B, id_col = "source_file", label = "Mean"))
 
-  # Append Total row (single) to keep it handy
-  mean_A <- dplyr::bind_rows(mean_A, summary_A %>% dplyr::filter(source_file == "Total"))
-  mean_B <- dplyr::bind_rows(mean_B, summary_B %>% dplyr::filter(source_file == "Total"))
+  mean_A <- fix_colnames_for_excel(dplyr::bind_rows(mean_A, summary_A %>% dplyr::filter(source_file == "Total")))
+  mean_B <- fix_colnames_for_excel(dplyr::bind_rows(mean_B, summary_B %>% dplyr::filter(source_file == "Total")))
 
   addWorksheet(wb, "Summary")
   r2 <- 1
   writeData(wb, "Summary", "A) Mean counts per plastic type (across files)", startRow = r2, startCol = 1)
   r2 <- r2 + 1
-  writeDataTable(wb, "Summary", mean_A, startRow = r2, startCol = 1)
+  safeWriteTable(wb, "Summary", mean_A, startRow = r2, startCol = 1)
   r2 <- r2 + nrow(mean_A) + 3
 
   writeData(wb, "Summary", "B) Mean counts per size class (across files)", startRow = r2, startCol = 1)
   r2 <- r2 + 1
-  writeDataTable(wb, "Summary", mean_B, startRow = r2, startCol = 1)
+  safeWriteTable(wb, "Summary", mean_B, startRow = r2, startCol = 1)
+  setColWidths(wb, "Summary", cols = 1:max(ncol(mean_A), ncol(mean_B)), widths = 10)
 
-  setColWidths(wb, "Summary", cols = 1:80, widths = 10)
+  addWorksheet(wb, "Unknown_Materials")
+  safeWriteTable(wb, "Unknown_Materials", unknown_all)
+  setColWidths(wb, "Unknown_Materials", cols = 1:ncol(unknown_all), widths = 10)
+
+  preflight <- dplyr::bind_rows(
+    preflight_table(long_df, "Long_Table"),
+    preflight_table(summary_A, "Total_A"),
+    preflight_table(summary_B, "Total_B"),
+    preflight_table(mean_A, "Summary_A"),
+    preflight_table(mean_B, "Summary_B"),
+    preflight_table(unknown_all, "Unknown_Materials")
+  )
+  print(preflight)
+
+  addWorksheet(wb, "Log")
+  safeWriteTable(wb, "Log", preflight)
+  setColWidths(wb, "Log", cols = 1:ncol(preflight), widths = 10)
 
   saveWorkbook(wb, output_path, overwrite = TRUE)
   output_path
 }
+
 
 # ---------------------------
 # Shiny app
