@@ -1331,6 +1331,14 @@ ui <- fluidPage(
           "Raman: .csv  •  FTIR: .csv  •  LDIR: .xlsx"),
       div(class = "text-muted", style = "font-size:11px; margin-top:2px;",
           "Default folder: REL (vs-monaco1)"),
+      tags$hr(style = "margin: 10px 0 6px;"),
+      fileInput("drop_files",
+        label       = tags$span(class = "text-muted", style = "font-size:11px;",
+                                 "Or drag & drop files here:"),
+        multiple    = TRUE,
+        accept      = c(".csv", ".xlsx", ".xls"),
+        width       = "100%"),
+      uiOutput("drop_section_ui"),
       br(),
 
       # 2. Detected instrument badge
@@ -1371,27 +1379,6 @@ ui <- fluidPage(
           hr(),
           uiOutput("file_queue_ui"),
           uiOutput("remove_controls_ui")
-        ),
-
-        # ---- Drag & drop ----
-        tabPanel("Drag & drop",
-          br(),
-          p(class = "text-muted",
-            "For local files. Output is downloaded rather than written next to the source."),
-          fileInput(
-            inputId  = "drop_files",
-            label    = "Drop files here or click to browse",
-            multiple = TRUE,
-            accept   = c(".csv", ".xlsx", ".xls"),
-            width    = "100%"
-          ),
-          uiOutput("drop_type_label"),
-          uiOutput("drop_ftir_selector"),
-          uiOutput("drop_hqi_ui"),
-          actionButton("process_drop", "Process", class = "btn-primary"),
-          br(), br(),
-          verbatimTextOutput("drop_status"),
-          uiOutput("download_btn_ui")
         ),
 
         # ---- Session log ----
@@ -1848,40 +1835,41 @@ server <- function(input, output, session) {
     type
   })
 
-  output$drop_type_label <- renderUI({
+  output$drop_section_ui <- renderUI({
+    req(input$drop_files)
     type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
-    if (is.null(type) || is.na(type)) return(NULL)
-    info <- switch(type,
-      "raman"          = list(cls = "success", txt = "Raman"),
-      "ldir"           = list(cls = "success", txt = "LDIR (Agilent 8700)"),
-      "ftir_spotlight" = list(cls = "success", txt = "FTIR Spotlight"),
-      "ftir_lumos"     = list(cls = "success", txt = "FTIR Lumos"),
-      "ftir"           = list(cls = "warning", txt = "FTIR — select type below"),
-                         list(cls = "danger",  txt = "Unknown")
-    )
-    div(style = "margin-bottom:8px;",
-        strong("Detected: "),
-        span(class = paste0("label label-", info$cls), info$txt))
-  })
-
-  output$drop_ftir_selector <- renderUI({
-    type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
-    if (isTRUE(type == "ftir"))
-      radioButtons("drop_ftir_type", "FTIR instrument:",
-                   choices  = c("FTIR Spotlight" = "ftir_spotlight",
-                                "FTIR Lumos"     = "ftir_lumos"),
-                   selected = "ftir_spotlight")
-  })
-
-  output$drop_hqi_ui <- renderUI({
-    type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
-    if (isTRUE(type == "raman"))
-      tagList(
-        numericInput("drop_hqi_cutoff", "HQI cutoff (%):",
-                     value = 70, min = 0, max = 100, step = 1),
-        tags$small(class = "text-muted", "Rows below cutoff are excluded."),
-        br()
+    info <- if (!is.null(type) && !is.na(type)) {
+      switch(type,
+        "raman"          = list(cls = "success", txt = "Raman"),
+        "ldir"           = list(cls = "success", txt = "LDIR (Agilent 8700)"),
+        "ftir_spotlight" = list(cls = "success", txt = "FTIR Spotlight"),
+        "ftir_lumos"     = list(cls = "success", txt = "FTIR Lumos"),
+        "ftir"           = list(cls = "warning", txt = "FTIR — select type"),
+                           list(cls = "danger",  txt = "Unknown")
       )
+    } else NULL
+    tagList(
+      if (!is.null(info))
+        div(style = "margin-bottom:8px;",
+            strong("Detected: "),
+            span(class = paste0("label label-", info$cls), info$txt)),
+      if (isTRUE(type == "ftir"))
+        radioButtons("drop_ftir_type", "FTIR instrument:",
+                     choices  = c("FTIR Spotlight" = "ftir_spotlight",
+                                  "FTIR Lumos"     = "ftir_lumos"),
+                     selected = "ftir_spotlight"),
+      if (isTRUE(type == "raman"))
+        tagList(
+          numericInput("drop_hqi_cutoff", "HQI cutoff (%):",
+                       value = 70, min = 0, max = 100, step = 1),
+          tags$small(class = "text-muted", "Rows below cutoff are excluded."),
+          br()),
+      actionButton("process_drop", "Process (drag-drop)",
+                   class = "btn-primary btn-sm btn-block"),
+      br(),
+      verbatimTextOutput("drop_status"),
+      uiOutput("download_btn_ui")
+    )
   })
 
   output$drop_status <- renderText(drop_status_val())
