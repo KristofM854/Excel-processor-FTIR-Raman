@@ -1250,11 +1250,9 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
         "ftir_lumos"     = "ftir_lumos",
         type
       )
-      out_file <- file.path(
-        folder_path,
-        paste0("processed_data_", type_label, "_",
-               format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
-      )
+      base_name <- tools::file_path_sans_ext(basename(group_files[[1L]]))
+      out_file <- file.path(folder_path,
+                            paste0(base_name, "_processed.xlsx"))
 
       res <- tryCatch({
         if (type == "raman") {
@@ -1690,7 +1688,7 @@ server <- function(input, output, session) {
     folder_ctrl <- if (length(ok_res) > 0L) {
       fc <- setNames(
         vapply(ok_res, function(r) dirname(r$path), character(1L)),
-        vapply(ok_res, function(r) basename(r$folder), character(1L))
+        vapply(ok_res, function(r) basename(r$path), character(1L))
       )
       tagList(br(),
         selectInput("folder_to_open", NULL, choices = fc, width = "100%"),
@@ -1811,8 +1809,8 @@ server <- function(input, output, session) {
       type <- tryCatch(drop_detected_type(), error = function(e) "unknown")
       if (isTRUE(type == "ftir") && !is.null(input$drop_ftir_type))
         type <- input$drop_ftir_type
-      paste0("processed_data_", type, "_",
-             format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+      base_name <- tools::file_path_sans_ext(input$drop_files$name[[1L]])
+      paste0(base_name, "_processed.xlsx")
     },
     content = function(file) file.copy(drop_result_path(), file)
   )
