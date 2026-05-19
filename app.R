@@ -409,9 +409,10 @@ detect_instrument_type <- function(paths) {
 # For FTIR files, try to disambiguate Spotlight vs Lumos from filenames.
 # Returns "ftir_spotlight", "ftir_lumos", or NA (needs modal).
 detect_ftir_subtype <- function(paths) {
-  fnames <- tolower(basename(paths))
-  if (any(grepl("spotlight", fnames, fixed = TRUE))) return("ftir_spotlight")
-  if (any(grepl("lumos",     fnames, fixed = TRUE))) return("ftir_lumos")
+  # Check both the filename and the full path (folders often contain "Lumos" / "SpotLight")
+  haystack <- tolower(c(basename(paths), paths))
+  if (any(grepl("spotlight", haystack, fixed = TRUE))) return("ftir_spotlight")
+  if (any(grepl("lumos",     haystack, fixed = TRUE))) return("ftir_lumos")
   NA_character_
 }
 
@@ -1187,6 +1188,102 @@ write_output_workbook_ldir <- function(input_paths, output_path) {
 
 
 # ---------------------------
+# Shared path helper
+# ---------------------------
+
+shorten_path <- function(p, n = 2L) {
+  parts <- strsplit(p, "[/\\\\]")[[1L]]
+  parts <- parts[nchar(parts) > 0L]
+  if (length(parts) <= n) p else paste(tail(parts, n), collapse = "/")
+}
+
+# ---------------------------
+# Multi-folder processing helper
+# ---------------------------
+
+run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_character_) {
+  results <- list()
+  n <- length(groups)
+
+  withProgress(message = "Processing files…", value = 0, {
+    for (i in seq_along(groups)) {
+      folder_path <- names(groups)[[i]]
+      group_files <- groups[[i]]
+
+      incProgress(
+        amount = 1 / n,
+        detail  = sprintf("%d / %d: %s", i, n, basename(folder_path))
+      )
+
+      type <- tryCatch(
+        detect_instrument_type(group_files),
+        error = function(e) NA_character_
+      )
+
+      if (is.na(type)) {
+        results[[folder_path]] <- list(
+          status = "error",
+          msg    = "Could not detect instrument type.",
+          folder = folder_path, n_files = length(group_files)
+        )
+        next
+      }
+
+      if (type == "ftir") {
+        sub  <- detect_ftir_subtype(group_files)
+        type <- if (!is.na(sub)) sub else ftir_override
+        if (is.na(type)) {
+          results[[folder_path]] <- list(
+            status = "error",
+            msg    = paste("FTIR type unclear.",
+                           "Add 'Spotlight' or 'Lumos' to the folder or file name."),
+            folder = folder_path, n_files = length(group_files)
+          )
+          next
+        }
+      }
+
+      type_label <- switch(type,
+        "raman"          = "raman",
+        "ldir"           = "ldir",
+        "ftir_spotlight" = "ftir_spotlight",
+        "ftir_lumos"     = "ftir_lumos",
+        type
+      )
+      out_file <- file.path(
+        folder_path,
+        paste0("processed_data_", type_label, "_",
+               format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+      )
+
+      res <- tryCatch({
+        if (type == "raman") {
+          write_output_workbook_raman(group_files, out_file, hqi_cutoff = hqi_cutoff)
+        } else if (type == "ldir") {
+          write_output_workbook_ldir(group_files, out_file)
+        } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
+          write_output_workbook_ftir(group_files, out_file)
+        } else {
+          stop("Unknown instrument type: ", type)
+        }
+        list(status = "ok",    path = out_file, type = type,
+             folder = folder_path, n_files = length(group_files))
+      }, error = function(e) {
+        list(status = "error", msg  = conditionMessage(e), type = type,
+             folder = folder_path, n_files = length(group_files))
+      })
+
+      results[[folder_path]] <- res
+    }
+
+    setProgress(1, detail = "Done.")
+  })
+
+  results
+}
+
+
+# ---------------------------
 # Shiny app
 # ---------------------------
 
@@ -1195,215 +1292,539 @@ ui <- fluidPage(
 
   sidebarLayout(
     sidebarPanel(
+      width = 4,
+
+      # 1. Add files
+      h5("1. Add files"),
       shinyFilesButton(
         id    = "files",
-        label = "Choose files (CSV or XLSX)",
-        title = "Select data files to process",
+        label = "Choose files (CSV / XLSX)",
+        title = "Select data files to add to the processing queue",
         multiple = TRUE
       ),
-      tags$small("Raman: .csv • FTIR: .csv • LDIR: .xlsx"),
-      br(), br(),
+      div(class = "text-muted", style = "font-size:11px; margin-top:4px;",
+          "Raman: .csv  •  FTIR: .csv  •  LDIR: .xlsx"),
+      div(class = "text-muted", style = "font-size:11px; margin-top:2px;",
+          "Last folder: ", textOutput("last_folder_text", inline = TRUE)),
+      br(),
 
+      # 2. Detected instrument badge
+      h5("2. Detected instrument"),
       uiOutput("instrument_label"),
       br(),
 
+      # HQI cutoff + preview (Raman only, rendered server-side)
       uiOutput("hqi_ui"),
 
-      tags$small("Output will be saved next to the selected files."),
+      # 3. Process
+      h5("3. Process"),
+      actionButton("process", "Process & Save", class = "btn-primary btn-block"),
       br(), br(),
 
-      actionButton("process", "Process & Save", class = "btn-primary"),
-      br(), br(),
       strong("Status:"),
       verbatimTextOutput("status"),
-      br(),
-      strong("Output path:"),
-      verbatimTextOutput("out_path")
+
+      # Output files + open-folder control
+      uiOutput("output_area_ui")
     ),
+
     mainPanel(
-      h4("Selected files"),
-      tableOutput("file_table")
+      width = 8,
+      tabsetPanel(
+        id = "main_tabs",
+
+        # ---- File queue ----
+        tabPanel("File queue",
+          br(),
+          fluidRow(
+            column(8, h5(textOutput("queue_summary"))),
+            column(4, div(style = "text-align:right; margin-top:6px;",
+              actionButton("clear_all", "Clear all",
+                           class = "btn-danger btn-xs", icon = icon("trash"))
+            ))
+          ),
+          hr(),
+          uiOutput("file_queue_ui"),
+          uiOutput("remove_controls_ui")
+        ),
+
+        # ---- Drag & drop ----
+        tabPanel("Drag & drop",
+          br(),
+          p(class = "text-muted",
+            "For local files. Output is downloaded rather than written next to the source."),
+          fileInput(
+            inputId  = "drop_files",
+            label    = "Drop files here or click to browse",
+            multiple = TRUE,
+            accept   = c(".csv", ".xlsx", ".xls"),
+            width    = "100%"
+          ),
+          uiOutput("drop_type_label"),
+          uiOutput("drop_ftir_selector"),
+          uiOutput("drop_hqi_ui"),
+          actionButton("process_drop", "Process", class = "btn-primary"),
+          br(), br(),
+          verbatimTextOutput("drop_status"),
+          uiOutput("download_btn_ui")
+        ),
+
+        # ---- Session log ----
+        tabPanel("Session log",
+          br(),
+          p(class = "text-muted", "All processing runs in this session."),
+          tableOutput("session_log_table")
+        )
+      )
     )
   )
 )
 
 server <- function(input, output, session) {
 
+  # ---- Drive roots (including mapped network drives) ----
   roots <- c("Home" = normalizePath("~", winslash = "/", mustWork = TRUE))
   if (.Platform$OS.type == "windows") {
-    # Scan every drive letter so mapped network drives appear automatically
     for (letter in LETTERS) {
       path <- paste0(letter, ":/")
       if (file.exists(path)) roots[[letter]] <- path
     }
-    # Also expose the IAEA network share directly via UNC if reachable
     unc <- "//vs-monaco1.iaea.org/REL"
     if (file.exists(unc)) roots[["REL (vs-monaco1)"]] <- unc
   }
+  shinyFileChoose(input, "files", roots = roots,
+                  filetypes = c("csv", "xlsx", "xls"))
 
-  shinyFileChoose(input, "files", roots = roots, filetypes = c("csv", "xlsx", "xls"))
+  # ---- Reactive state ----
+  browser_file_list <- reactiveVal(character(0))  # accumulated queue
+  detected_type     <- reactiveVal(NA_character_) # badge (most recent add)
+  last_folder       <- reactiveVal("")
+  out_results       <- reactiveVal(list())        # per-folder processing results
+  pending_groups_rv <- reactiveVal(NULL)          # groups awaiting FTIR modal
+  pending_hqi_rv    <- reactiveVal(70)
+  status_val        <- reactiveVal("Add files to the queue, then click Process & Save.")
+  drop_result_path  <- reactiveVal(NULL)
+  drop_status_val   <- reactiveVal("")
 
+  session_log <- reactiveVal(data.frame(
+    Time   = character(0), Source = character(0), Type = character(0),
+    Files  = integer(0),   Status = character(0), Output = character(0),
+    stringsAsFactors = FALSE
+  ))
+
+  # ---- File picker → reactive path list ----
   selected_paths <- reactive({
     req(input$files)
-    paths <- shinyFiles::parseFilePaths(roots, input$files)
-    as.character(paths$datapath)
+    as.character(shinyFiles::parseFilePaths(roots, input$files)$datapath)
   })
 
-  output$file_table <- renderTable({
-    req(selected_paths())
-    data.frame(
-      File   = basename(selected_paths()),
-      Folder = dirname(selected_paths()),
-      stringsAsFactors = FALSE
-    )
-  })
-
-  # Holds the confirmed instrument type: "raman", "ldir", "ftir_spotlight",
-  # "ftir_lumos", "ftir" (unconfirmed), or NA.
-  detected_type <- reactiveVal(NA_character_)
-
-  # Detect instrument whenever the file selection changes
+  # ---- Append picker selection to queue ----
   observeEvent(selected_paths(), {
-    detected_type(NA_character_)
-    paths <- selected_paths()
-    if (length(paths) == 0) return()
+    new_paths <- selected_paths()
+    if (length(new_paths) == 0) return()
 
-    type <- tryCatch(
-      detect_instrument_type(paths),
-      error = function(e) NA_character_
+    browser_file_list(unique(c(browser_file_list(), new_paths)))
+    last_folder(dirname(new_paths[[1L]]))
+
+    # Clear any stale checkbox selections
+    updateCheckboxGroupInput(session, "files_to_remove", selected = character(0))
+
+    # Update badge from the most recently added batch
+    type <- tryCatch(detect_instrument_type(new_paths), error = function(e) NA_character_)
+    if (!is.na(type) && type == "ftir") {
+      sub  <- detect_ftir_subtype(new_paths)
+      type <- if (!is.na(sub)) sub else "ftir"
+    }
+    detected_type(type)
+  })
+
+  # ---- Remove checked files ----
+  observeEvent(input$remove_selected, {
+    to_rm <- suppressWarnings(as.integer(input$files_to_remove))
+    to_rm <- to_rm[!is.na(to_rm)]
+    if (length(to_rm) > 0) {
+      browser_file_list(browser_file_list()[-to_rm])
+      updateCheckboxGroupInput(session, "files_to_remove", selected = character(0))
+      if (length(browser_file_list()) == 0) detected_type(NA_character_)
+    }
+  })
+
+  # ---- Clear all ----
+  observeEvent(input$clear_all, {
+    browser_file_list(character(0))
+    detected_type(NA_character_)
+    out_results(list())
+    status_val("Queue cleared.")
+    updateCheckboxGroupInput(session, "files_to_remove", selected = character(0))
+  })
+
+  # ---- HQI preview: cache raw Raman reads (no cutoff) ----
+  raw_raman_reads <- reactive({
+    if (isTRUE(detected_type() != "raman")) return(NULL)
+    files <- browser_file_list()
+    if (length(files) == 0L) return(NULL)
+    csv_files <- files[tolower(tools::file_ext(files)) == "csv"]
+    if (length(csv_files) == 0L) return(NULL)
+    reads <- lapply(csv_files, function(f) {
+      tryCatch(read_one_csv_raman(f, hqi_cutoff = 0), error = function(e) NULL)
+    })
+    Filter(Negate(is.null), reads)
+  })
+
+  raman_preview <- reactive({
+    reads <- raw_raman_reads()
+    if (is.null(reads) || length(reads) == 0L) return(NULL)
+    hqi   <- if (!is.null(input$hqi_cutoff)) input$hqi_cutoff else 70
+    total <- sum(vapply(reads, nrow, integer(1L)))
+    pass  <- sum(vapply(reads, function(df)
+      sum(df$hqi_value >= hqi, na.rm = TRUE), integer(1L)))
+    list(pass = pass, total = total)
+  })
+
+  # ---- Processing helper (inside server for reactive value access) ----
+  do_browser_processing <- function(groups, hqi, ftir_override) {
+    status_val("Processing…")
+    out_results(list())
+
+    results <- run_browser_processing(groups, hqi, ftir_override)
+    out_results(results)
+
+    n_ok  <- sum(vapply(results, function(r) r$status == "ok",    logical(1L)))
+    n_err <- sum(vapply(results, function(r) r$status == "error", logical(1L)))
+    status_val(
+      if (n_err == 0L)
+        sprintf("Done — %d output file%s saved.", n_ok, if (n_ok == 1L) "" else "s")
+      else
+        sprintf("Finished with errors: %d ok, %d failed.", n_ok, n_err)
     )
 
-    if (is.na(type)) {
-      detected_type(NA_character_)
+    new_rows <- lapply(results, function(r) {
+      data.frame(
+        Time   = format(Sys.time(), "%H:%M:%S"),
+        Source = "browser",
+        Type   = if (!is.null(r$type))    r$type    else "?",
+        Files  = if (!is.null(r$n_files)) r$n_files else 0L,
+        Status = r$status,
+        Output = if (r$status == "ok") basename(r$path)
+                 else if (!is.null(r$msg)) r$msg else "error",
+        stringsAsFactors = FALSE
+      )
+    })
+    if (length(new_rows) > 0L) {
+      session_log(dplyr::bind_rows(session_log(),
+                                   do.call(rbind, Filter(Negate(is.null), new_rows))))
+    }
+  }
+
+  # ---- Process button: browser workflow ----
+  observeEvent(input$process, {
+    files <- browser_file_list()
+    if (length(files) == 0L) {
+      status_val("No files in queue. Add files using the file picker.")
       return()
     }
 
-    if (type == "ftir") {
-      sub <- detect_ftir_subtype(paths)
-      if (!is.na(sub)) {
-        detected_type(sub)
-      } else {
-        detected_type("ftir")  # waiting for user confirmation
-        showModal(modalDialog(
-          title = "FTIR Instrument Type",
-          p("The filename does not indicate whether this is FTIR Spotlight or FTIR Lumos."),
-          p("Please select the correct instrument before processing:"),
-          radioButtons(
-            inputId  = "ftir_subtype_choice",
-            label    = NULL,
-            choices  = c("FTIR Spotlight" = "ftir_spotlight",
-                         "FTIR Lumos"     = "ftir_lumos"),
-            selected = "ftir_spotlight"
-          ),
-          footer    = actionButton("ftir_confirm", "Confirm", class = "btn-primary"),
-          easyClose = FALSE
-        ))
-      }
+    groups <- split(files, dirname(files))
+    hqi    <- if (!is.null(input$hqi_cutoff)) input$hqi_cutoff else 70
+
+    # Pre-scan for FTIR groups that can't be auto-disambiguated
+    ambiguous <- character(0)
+    for (folder in names(groups)) {
+      t <- tryCatch(detect_instrument_type(groups[[folder]]),
+                    error = function(e) NA_character_)
+      if (!is.na(t) && t == "ftir" &&
+          is.na(detect_ftir_subtype(groups[[folder]])))
+        ambiguous <- c(ambiguous, folder)
+    }
+
+    if (length(ambiguous) > 0L) {
+      pending_groups_rv(groups)
+      pending_hqi_rv(hqi)
+      showModal(modalDialog(
+        title = "FTIR Instrument Type",
+        p(sprintf("Cannot auto-detect FTIR type for: %s",
+                  paste(basename(ambiguous), collapse = ", "))),
+        p("Select the type to apply to these folders:"),
+        radioButtons("ftir_subtype_choice", NULL,
+                     choices  = c("FTIR Spotlight" = "ftir_spotlight",
+                                  "FTIR Lumos"     = "ftir_lumos"),
+                     selected = "ftir_spotlight"),
+        footer    = actionButton("ftir_confirm", "Confirm & Process",
+                                 class = "btn-primary"),
+        easyClose = FALSE
+      ))
     } else {
-      detected_type(type)
+      do_browser_processing(groups, hqi, NA_character_)
     }
   })
 
   observeEvent(input$ftir_confirm, {
-    detected_type(input$ftir_subtype_choice)
     removeModal()
+    groups       <- pending_groups_rv()
+    hqi          <- pending_hqi_rv()
+    ftir_override <- input$ftir_subtype_choice
+    pending_groups_rv(NULL)
+    if (!is.null(groups)) do_browser_processing(groups, hqi, ftir_override)
+  })
+
+  # ---- Open output folder ----
+  observeEvent(input$open_folder, {
+    folder <- input$folder_to_open
+    if (is.null(folder) || !nzchar(folder)) return()
+    folder <- normalizePath(folder, winslash = "\\", mustWork = FALSE)
+    if (.Platform$OS.type == "windows") shell.exec(folder)
+    else if (Sys.info()[["sysname"]] == "Darwin") system2("open",     shQuote(folder))
+    else                                           system2("xdg-open", shQuote(folder))
+  })
+
+  # ====== Rendered outputs ======
+
+  output$status <- renderText(status_val())
+
+  output$last_folder_text <- renderText({
+    f <- last_folder()
+    if (!nzchar(f)) return("—")
+    shorten_path(f, n = 2L)
   })
 
   output$instrument_label <- renderUI({
-    type <- detected_type()
-    paths <- if (length(selected_paths()) > 0) selected_paths() else character(0)
+    type  <- detected_type()
+    files <- browser_file_list()
 
     if (is.null(type) || is.na(type)) {
-      if (length(paths) > 0)
-        return(tags$p(tags$em("Could not detect instrument type."), style = "color:#c0392b;"))
-      return(tags$p(tags$em("No files selected."), style = "color:gray;"))
-    }
-
-    label <- switch(type,
-      "raman"          = "Raman",
-      "ldir"           = "LDIR (Agilent 8700)",
-      "ftir_spotlight" = "FTIR Spotlight",
-      "ftir_lumos"     = "FTIR Lumos",
-      "ftir"           = "FTIR (awaiting confirmation…)",
-      paste("Unknown:", type)
-    )
-    tags$p(
-      tags$strong("Detected instrument: "),
-      tags$span(label, style = "color:#2c7bb6; font-weight:bold;")
-    )
-  })
-
-  # Show HQI cutoff only for Raman
-  output$hqi_ui <- renderUI({
-    type <- detected_type()
-    if (!is.null(type) && !is.na(type) && type == "raman") {
-      tagList(
-        numericInput(
-          inputId = "hqi_cutoff",
-          label   = "HQI cutoff (%)",
-          value   = 70, min = 0, max = 100, step = 1
-        ),
-        tags$small("Rows with HQI below the cutoff are discarded before processing."),
-        br(), br()
+      return(if (length(files) > 0L)
+        span(class = "label label-danger", "Unknown / not detected")
+      else
+        span(class = "label label-default", "None")
       )
     }
+
+    info <- switch(type,
+      "raman"          = list(cls = "success", txt = "Raman"),
+      "ldir"           = list(cls = "success", txt = "LDIR (Agilent 8700)"),
+      "ftir_spotlight" = list(cls = "success", txt = "FTIR Spotlight"),
+      "ftir_lumos"     = list(cls = "success", txt = "FTIR Lumos"),
+      "ftir"           = list(cls = "warning", txt = "FTIR — select type"),
+                         list(cls = "danger",  txt = paste("Unknown:", type))
+    )
+    span(class = paste0("label label-", info$cls), info$txt)
   })
 
-  status_val   <- reactiveVal("Select files, then click Process & Save.")
-  out_path_val <- reactiveVal("")
+  output$hqi_ui <- renderUI({
+    if (isTRUE(detected_type() != "raman")) return(NULL)
 
-  output$status   <- renderText(status_val())
-  output$out_path <- renderText(out_path_val())
+    preview   <- raman_preview()
+    prev_ui   <- if (!is.null(preview) && preview$total > 0L) {
+      pct <- round(100 * preview$pass / preview$total)
+      cls <- if (preview$pass == 0L) "text-danger" else "text-success"
+      div(class = cls, style = "font-size:12px; margin-top:4px;",
+          icon(if (preview$pass == 0L) "exclamation-triangle" else "check"),
+          sprintf(" %d / %d particles pass (%.0f%%)",
+                  preview$pass, preview$total, pct))
+    } else NULL
 
-  observeEvent(input$process, {
-    req(selected_paths())
-    paths <- selected_paths()
-    type  <- detected_type()
+    tagList(
+      h5("HQI filter"),
+      numericInput("hqi_cutoff", "Cutoff (%):",
+                   value = 70, min = 0, max = 100, step = 1),
+      prev_ui,
+      tags$small(class = "text-muted",
+                 "Rows below cutoff are excluded before processing."),
+      br(), br()
+    )
+  })
+
+  output$queue_summary <- renderText({
+    files <- browser_file_list()
+    n     <- length(files)
+    if (n == 0L) return("Queue is empty")
+    nf <- length(unique(dirname(files)))
+    sprintf("%d file%s from %d folder%s",
+            n,  if (n  == 1L) "" else "s",
+            nf, if (nf == 1L) "" else "s")
+  })
+
+  output$file_queue_ui <- renderUI({
+    files <- browser_file_list()
+    if (length(files) == 0L) {
+      return(div(class = "text-muted", style = "padding:8px 0;",
+                 "No files queued yet. Use the file picker above."))
+    }
+    labels <- paste0(
+      basename(files), "  (",
+      vapply(dirname(files), shorten_path, character(1L), n = 2L), ")"
+    )
+    checkboxGroupInput(
+      inputId      = "files_to_remove",
+      label        = NULL,
+      choiceNames  = as.list(labels),
+      choiceValues = as.list(as.character(seq_along(files)))
+    )
+  })
+
+  output$remove_controls_ui <- renderUI({
+    if (length(browser_file_list()) == 0L) return(NULL)
+    tagList(br(),
+      actionButton("remove_selected", "Remove checked",
+                   icon = icon("trash"), class = "btn-warning btn-sm"))
+  })
+
+  output$output_area_ui <- renderUI({
+    results <- out_results()
+    if (length(results) == 0L) return(NULL)
+
+    ok_res  <- Filter(function(r) r$status == "ok",    results)
+    err_res <- Filter(function(r) r$status == "error", results)
+
+    ok_items <- lapply(ok_res, function(r) {
+      div(class = "text-success", style = "margin-top:5px;",
+          icon("check-circle"), " ", tags$strong(basename(r$path)), br(),
+          tags$small(class = "text-muted", shorten_path(r$folder, n = 3L)))
+    })
+    err_items <- lapply(err_res, function(r) {
+      div(class = "text-danger", style = "margin-top:5px;",
+          icon("times-circle"), " ",
+          tags$small(if (!is.null(r$msg)) r$msg else "error"))
+    })
+
+    folder_ctrl <- if (length(ok_res) > 0L) {
+      fc <- setNames(
+        vapply(ok_res, function(r) dirname(r$path), character(1L)),
+        vapply(ok_res, function(r) basename(r$folder), character(1L))
+      )
+      tagList(br(),
+        selectInput("folder_to_open", NULL, choices = fc, width = "100%"),
+        actionButton("open_folder", "Open output folder",
+                     icon = icon("folder-open"), class = "btn-default btn-sm"))
+    } else NULL
+
+    tagList(br(), strong("Output:"), br(),
+            do.call(tagList, c(ok_items, err_items)),
+            folder_ctrl)
+  })
+
+  # ---- Drag & drop tab ----
+
+  drop_detected_type <- reactive({
+    req(input$drop_files)
+    paths      <- input$drop_files$datapath
+    orig_names <- input$drop_files$name
+    type <- tryCatch(detect_instrument_type(paths), error = function(e) NA_character_)
+    if (!is.na(type) && type == "ftir") {
+      sub  <- detect_ftir_subtype(orig_names)
+      type <- if (!is.na(sub)) sub else "ftir"
+    }
+    type
+  })
+
+  output$drop_type_label <- renderUI({
+    type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
+    if (is.null(type) || is.na(type)) return(NULL)
+    info <- switch(type,
+      "raman"          = list(cls = "success", txt = "Raman"),
+      "ldir"           = list(cls = "success", txt = "LDIR (Agilent 8700)"),
+      "ftir_spotlight" = list(cls = "success", txt = "FTIR Spotlight"),
+      "ftir_lumos"     = list(cls = "success", txt = "FTIR Lumos"),
+      "ftir"           = list(cls = "warning", txt = "FTIR — select type below"),
+                         list(cls = "danger",  txt = "Unknown")
+    )
+    div(style = "margin-bottom:8px;",
+        strong("Detected: "),
+        span(class = paste0("label label-", info$cls), info$txt))
+  })
+
+  output$drop_ftir_selector <- renderUI({
+    type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
+    if (isTRUE(type == "ftir"))
+      radioButtons("drop_ftir_type", "FTIR instrument:",
+                   choices  = c("FTIR Spotlight" = "ftir_spotlight",
+                                "FTIR Lumos"     = "ftir_lumos"),
+                   selected = "ftir_spotlight")
+  })
+
+  output$drop_hqi_ui <- renderUI({
+    type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
+    if (isTRUE(type == "raman"))
+      tagList(
+        numericInput("drop_hqi_cutoff", "HQI cutoff (%):",
+                     value = 70, min = 0, max = 100, step = 1),
+        tags$small(class = "text-muted", "Rows below cutoff are excluded."),
+        br()
+      )
+  })
+
+  output$drop_status <- renderText(drop_status_val())
+
+  observeEvent(input$process_drop, {
+    req(input$drop_files)
+    paths <- input$drop_files$datapath
+    type  <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
 
     if (is.null(type) || is.na(type)) {
-      status_val("ERROR: Instrument type could not be detected. Check your file.")
+      drop_status_val("ERROR: Could not detect instrument type.")
       return()
     }
-    if (type == "ftir") {
-      status_val("Please confirm the FTIR instrument type in the dialog first.")
-      return()
-    }
+    if (type == "ftir")
+      type <- if (!is.null(input$drop_ftir_type)) input$drop_ftir_type else "ftir_spotlight"
 
-    type_label <- switch(type,
-      "raman"          = "raman",
-      "ldir"           = "ldir",
-      "ftir_spotlight" = "ftir_spotlight",
-      "ftir_lumos"     = "ftir_lumos",
-      type
-    )
+    hqi      <- if (!is.null(input$drop_hqi_cutoff)) input$drop_hqi_cutoff else 70
+    out_file <- tempfile(fileext = ".xlsx")
+    drop_status_val("Processing…")
+    drop_result_path(NULL)
 
-    out_dir  <- dirname(paths[[1]])
-    out_file <- file.path(
-      out_dir,
-      paste0("processed_data_", type_label, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
-    )
-
-    status_val("Processing…")
-    out_path_val("")
-
-    tryCatch({
-      res <- if (type == "raman") {
-        hqi <- if (!is.null(input$hqi_cutoff)) input$hqi_cutoff else 70
-        write_output_workbook_raman(paths, out_file, hqi_cutoff = hqi)
-      } else if (type == "ldir") {
-        write_output_workbook_ldir(paths, out_file)
-      } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
-        write_output_workbook_ftir(paths, out_file)
-      } else {
-        stop("Unknown instrument type: ", type)
-      }
-      status_val("Done.")
-      out_path_val(res)
-    }, error = function(e) {
-      status_val(paste("ERROR:", conditionMessage(e)))
-      out_path_val("")
+    withProgress(message = "Processing (drag-drop)…", {
+      tryCatch({
+        if (type == "raman") {
+          write_output_workbook_raman(paths, out_file, hqi_cutoff = hqi)
+        } else if (type == "ldir") {
+          write_output_workbook_ldir(paths, out_file)
+        } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
+          write_output_workbook_ftir(paths, out_file)
+        } else {
+          stop("Unknown instrument type: ", type)
+        }
+        drop_result_path(out_file)
+        drop_status_val("Done! Click Download to save the workbook.")
+        session_log(dplyr::bind_rows(session_log(), data.frame(
+          Time   = format(Sys.time(), "%H:%M:%S"),
+          Source = "drag-drop",
+          Type   = type,
+          Files  = nrow(input$drop_files),
+          Status = "ok",
+          Output = "(downloaded)",
+          stringsAsFactors = FALSE
+        )))
+      }, error = function(e) {
+        drop_status_val(paste("ERROR:", conditionMessage(e)))
+      })
     })
   })
+
+  output$download_btn_ui <- renderUI({
+    req(drop_result_path())
+    downloadButton("drop_download", "Download output workbook",
+                   class = "btn-success")
+  })
+
+  output$drop_download <- downloadHandler(
+    filename = function() {
+      type <- tryCatch(drop_detected_type(), error = function(e) "unknown")
+      if (isTRUE(type == "ftir") && !is.null(input$drop_ftir_type))
+        type <- input$drop_ftir_type
+      paste0("processed_data_", type, "_",
+             format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+    },
+    content = function(file) file.copy(drop_result_path(), file)
+  )
+
+  # ---- Session log ----
+  output$session_log_table <- renderTable({
+    log <- session_log()
+    if (nrow(log) == 0L)
+      return(data.frame(Message = "No processing runs yet.",
+                        stringsAsFactors = FALSE))
+    log
+  }, striped = TRUE, bordered = TRUE, hover = TRUE, width = "100%")
 }
 
 shinyApp(ui, server)
