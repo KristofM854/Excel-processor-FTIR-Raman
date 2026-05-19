@@ -1234,7 +1234,9 @@ preview_file <- function(path, n = 10L) {
 # Multi-folder processing helper
 # ---------------------------
 
-run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_character_) {
+run_browser_processing <- function(groups, hqi_cutoff,
+                                   ftir_override = NA_character_,
+                                   mode = "separate") {
   results <- list()
   total_files <- sum(lengths(groups))
   done        <- 0L
@@ -1244,7 +1246,7 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
       folder_path <- names(groups)[[i]]
       group_files <- groups[[i]]
 
-      # ---- Instrument detection is done once per folder group ----
+      # ---- Instrument detection once per folder group ----
       type <- tryCatch(
         detect_instrument_type(group_files),
         error = function(e) NA_character_
@@ -1253,11 +1255,9 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
       if (is.na(type)) {
         for (f in group_files) {
           done <- done + 1L
-          results[[f]] <- list(
-            status = "error",
-            msg    = "Could not detect instrument type.",
-            type   = NA_character_, folder = folder_path, n_files = 1L
-          )
+          results[[f]] <- list(status = "error",
+            msg = "Could not detect instrument type.",
+            type = NA_character_, folder = folder_path, n_files = 1L)
         }
         incProgress(length(group_files) / total_files,
                     detail = sprintf("%d / %d", done, total_files))
@@ -1270,12 +1270,10 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
         if (is.na(type)) {
           for (f in group_files) {
             done <- done + 1L
-            results[[f]] <- list(
-              status = "error",
-              msg    = paste("FTIR type unclear.",
-                             "Add 'Spotlight' or 'Lumos' to the folder or file name."),
-              type   = "ftir", folder = folder_path, n_files = 1L
-            )
+            results[[f]] <- list(status = "error",
+              msg  = paste("FTIR type unclear.",
+                           "Add 'Spotlight' or 'Lumos' to the folder or file name."),
+              type = "ftir", folder = folder_path, n_files = 1L)
           }
           incProgress(length(group_files) / total_files,
                       detail = sprintf("%d / %d", done, total_files))
@@ -1283,33 +1281,59 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
         }
       }
 
-      # ---- Process each file individually ----
-      for (f in group_files) {
-        done    <- done + 1L
+      # ---- Branch: separate (one output per file) or combined (one per folder) ----
+      if (mode == "combined") {
+        done     <- done + length(group_files)
         out_file <- file.path(folder_path,
-                              paste0(tools::file_path_sans_ext(basename(f)),
-                                     "_processed.xlsx"))
-        incProgress(1 / total_files,
-                    detail = sprintf("%d / %d: %s", done, total_files, basename(f)))
-
+                              paste0(basename(folder_path), "_processed.xlsx"))
+        incProgress(length(group_files) / total_files,
+                    detail = sprintf("%d / %d: %s (combined)",
+                                     done, total_files, basename(folder_path)))
         res <- tryCatch({
           if (type == "raman") {
-            write_output_workbook_raman(f, out_file, hqi_cutoff = hqi_cutoff)
+            write_output_workbook_raman(group_files, out_file, hqi_cutoff = hqi_cutoff)
           } else if (type == "ldir") {
-            write_output_workbook_ldir(f, out_file)
+            write_output_workbook_ldir(group_files, out_file)
           } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
-            write_output_workbook_ftir(f, out_file)
+            write_output_workbook_ftir(group_files, out_file)
           } else {
             stop("Unknown instrument type: ", type)
           }
-          list(status = "ok",    path = out_file, type = type,
-               folder = folder_path, n_files = 1L)
+          list(status = "ok",  path = out_file, type = type,
+               folder = folder_path, n_files = length(group_files))
         }, error = function(e) {
-          list(status = "error", msg  = conditionMessage(e), type = type,
-               folder = folder_path, n_files = 1L)
+          list(status = "error", msg = conditionMessage(e), type = type,
+               folder = folder_path, n_files = length(group_files))
         })
+        results[[folder_path]] <- res
 
-        results[[f]] <- res
+      } else {
+        # Separate: one output per input file
+        for (f in group_files) {
+          done    <- done + 1L
+          out_file <- file.path(folder_path,
+                                paste0(tools::file_path_sans_ext(basename(f)),
+                                       "_processed.xlsx"))
+          incProgress(1 / total_files,
+                      detail = sprintf("%d / %d: %s", done, total_files, basename(f)))
+          res <- tryCatch({
+            if (type == "raman") {
+              write_output_workbook_raman(f, out_file, hqi_cutoff = hqi_cutoff)
+            } else if (type == "ldir") {
+              write_output_workbook_ldir(f, out_file)
+            } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
+              write_output_workbook_ftir(f, out_file)
+            } else {
+              stop("Unknown instrument type: ", type)
+            }
+            list(status = "ok",  path = out_file, type = type,
+                 folder = folder_path, n_files = 1L)
+          }, error = function(e) {
+            list(status = "error", msg = conditionMessage(e), type = type,
+                 folder = folder_path, n_files = 1L)
+          })
+          results[[f]] <- res
+        }
       }
     }
 
@@ -1366,6 +1390,15 @@ ui <- fluidPage(
 
       # 3. Process
       h5("3. Process"),
+      div(id = "output_mode_ui",
+        radioButtons("output_mode", NULL,
+          choices = c(
+            "Separate — one output file per input file"    = "separate",
+            "Combined — merge all files from the same folder into one output" = "combined"
+          ),
+          selected = "separate"
+        )
+      ),
       actionButton("process", "Process & Save", class = "btn-primary btn-block"),
       br(), br(),
 
@@ -1432,6 +1465,7 @@ server <- function(input, output, session) {
   out_results          <- reactiveVal(list())                     # per-folder processing results
   pending_groups_rv <- reactiveVal(NULL)          # groups awaiting FTIR modal
   pending_hqi_rv    <- reactiveVal(70)
+  pending_mode_rv   <- reactiveVal("separate")
   status_val        <- reactiveVal("Add files to the queue, then click Process & Save.")
   drop_result_path  <- reactiveVal(NULL)
   drop_status_val   <- reactiveVal("")
@@ -1533,11 +1567,11 @@ server <- function(input, output, session) {
   })
 
   # ---- Processing helper (inside server for reactive value access) ----
-  do_browser_processing <- function(groups, hqi, ftir_override) {
+  do_browser_processing <- function(groups, hqi, ftir_override, mode = "separate") {
     status_val("Processing…")
     out_results(list())
 
-    results <- run_browser_processing(groups, hqi, ftir_override)
+    results <- run_browser_processing(groups, hqi, ftir_override, mode = mode)
     out_results(results)
 
     n_ok  <- sum(vapply(results, function(r) r$status == "ok",    logical(1L)))
@@ -1577,6 +1611,7 @@ server <- function(input, output, session) {
 
     groups <- split(files, dirname(files))
     hqi    <- if (!is.null(input$hqi_cutoff)) input$hqi_cutoff else 70
+    mode   <- if (!is.null(input$output_mode)) input$output_mode else "separate"
 
     # Pre-scan for FTIR groups that can't be auto-disambiguated
     ambiguous <- character(0)
@@ -1591,6 +1626,7 @@ server <- function(input, output, session) {
     if (length(ambiguous) > 0L) {
       pending_groups_rv(groups)
       pending_hqi_rv(hqi)
+      pending_mode_rv(mode)
       showModal(modalDialog(
         title = "FTIR Instrument Type",
         p(sprintf("Cannot auto-detect FTIR type for: %s",
@@ -1605,17 +1641,18 @@ server <- function(input, output, session) {
         easyClose = FALSE
       ))
     } else {
-      do_browser_processing(groups, hqi, NA_character_)
+      do_browser_processing(groups, hqi, NA_character_, mode)
     }
   })
 
   observeEvent(input$ftir_confirm, {
     removeModal()
-    groups       <- pending_groups_rv()
-    hqi          <- pending_hqi_rv()
+    groups        <- pending_groups_rv()
+    hqi           <- pending_hqi_rv()
+    mode          <- pending_mode_rv()
     ftir_override <- input$ftir_subtype_choice
     pending_groups_rv(NULL)
-    if (!is.null(groups)) do_browser_processing(groups, hqi, ftir_override)
+    if (!is.null(groups)) do_browser_processing(groups, hqi, ftir_override, mode)
   })
 
   # ---- Open output folder ----
@@ -2044,9 +2081,25 @@ server <- function(input, output, session) {
           position = "right"
         ),
         list(
+          element  = "#output_mode_ui",
+          intro    = paste0(
+            "<b>Step 5 &mdash; Output mode</b><br><br>",
+            "Choose how results are saved before clicking Process:<br><br>",
+            "<b>Separate</b> &mdash; each input file produces its own ",
+            "<code>&lt;filename&gt;_processed.xlsx</code> saved next to the source. ",
+            "Best when each file is an independent sample.<br><br>",
+            "<b>Combined</b> &mdash; all files from the same folder are merged into ",
+            "one workbook named after the folder ",
+            "(<code>&lt;folder&gt;_processed.xlsx</code>). ",
+            "Best when multiple files belong to the same measurement run and you want ",
+            "cross-file totals and means in a single workbook."
+          ),
+          position = "right"
+        ),
+        list(
           element  = "#process",
           intro    = paste0(
-            "<b>Step 5 &mdash; Process &amp; Save</b><br><br>",
+            "<b>Step 6 &mdash; Process &amp; Save</b><br><br>",
             "Processes every file in the queue. ",
             "Files from the <b>same folder</b> are combined into one workbook. ",
             "Each workbook is saved as ",
@@ -2062,7 +2115,7 @@ server <- function(input, output, session) {
         list(
           element  = "#output_area_ui",
           intro    = paste0(
-            "<b>Step 6 &mdash; Results</b><br><br>",
+            "<b>Step 7 &mdash; Results</b><br><br>",
             "After processing, each output file is listed here with a ",
             "success or error indicator.<br><br>",
             "Select an output from the dropdown and click ",
@@ -2075,7 +2128,7 @@ server <- function(input, output, session) {
         list(
           element  = "a[data-value='Session log']",
           intro    = paste0(
-            "<b>Step 7 &mdash; Session log</b><br><br>",
+            "<b>Step 8 &mdash; Session log</b><br><br>",
             "A running record of every processing job in this session: ",
             "timestamp, input source (<i>file picker</i> vs <i>drag-drop</i>), ",
             "instrument type, number of files processed, and the output filename ",
