@@ -409,9 +409,10 @@ detect_instrument_type <- function(paths) {
 # For FTIR files, try to disambiguate Spotlight vs Lumos from filenames.
 # Returns "ftir_spotlight", "ftir_lumos", or NA (needs modal).
 detect_ftir_subtype <- function(paths) {
-  fnames <- tolower(basename(paths))
-  if (any(grepl("spotlight", fnames, fixed = TRUE))) return("ftir_spotlight")
-  if (any(grepl("lumos",     fnames, fixed = TRUE))) return("ftir_lumos")
+  # Check both the filename and the full path (folders often contain "Lumos" / "SpotLight")
+  haystack <- tolower(c(basename(paths), paths))
+  if (any(grepl("spotlight", haystack, fixed = TRUE))) return("ftir_spotlight")
+  if (any(grepl("lumos",     haystack, fixed = TRUE))) return("ftir_lumos")
   NA_character_
 }
 
@@ -1218,7 +1219,8 @@ ui <- fluidPage(
       verbatimTextOutput("status"),
       br(),
       strong("Output path:"),
-      verbatimTextOutput("out_path")
+      verbatimTextOutput("out_path"),
+      uiOutput("open_folder_btn")
     ),
     mainPanel(
       h4("Selected files"),
@@ -1403,6 +1405,23 @@ server <- function(input, output, session) {
       status_val(paste("ERROR:", conditionMessage(e)))
       out_path_val("")
     })
+  })
+
+  output$open_folder_btn <- renderUI({
+    req(nchar(out_path_val()) > 0)
+    actionButton("open_folder", "Open output folder",
+                 icon = icon("folder-open"), class = "btn-default btn-sm")
+  })
+
+  observeEvent(input$open_folder, {
+    folder <- normalizePath(dirname(out_path_val()), winslash = "\\", mustWork = FALSE)
+    if (.Platform$OS.type == "windows") {
+      shell.exec(folder)
+    } else if (Sys.info()[["sysname"]] == "Darwin") {
+      system2("open", shQuote(folder))
+    } else {
+      system2("xdg-open", shQuote(folder))
+    }
   })
 }
 
