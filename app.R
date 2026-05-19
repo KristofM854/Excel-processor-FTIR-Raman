@@ -1236,29 +1236,31 @@ preview_file <- function(path, n = 10L) {
 
 run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_character_) {
   results <- list()
-  n <- length(groups)
+  total_files <- sum(lengths(groups))
+  done        <- 0L
 
   withProgress(message = "Processing files…", value = 0, {
     for (i in seq_along(groups)) {
       folder_path <- names(groups)[[i]]
       group_files <- groups[[i]]
 
-      incProgress(
-        amount = 1 / n,
-        detail  = sprintf("%d / %d: %s", i, n, basename(folder_path))
-      )
-
+      # ---- Instrument detection is done once per folder group ----
       type <- tryCatch(
         detect_instrument_type(group_files),
         error = function(e) NA_character_
       )
 
       if (is.na(type)) {
-        results[[folder_path]] <- list(
-          status = "error",
-          msg    = "Could not detect instrument type.",
-          folder = folder_path, n_files = length(group_files)
-        )
+        for (f in group_files) {
+          done <- done + 1L
+          results[[f]] <- list(
+            status = "error",
+            msg    = "Could not detect instrument type.",
+            type   = NA_character_, folder = folder_path, n_files = 1L
+          )
+        }
+        incProgress(length(group_files) / total_files,
+                    detail = sprintf("%d / %d", done, total_files))
         next
       }
 
@@ -1266,45 +1268,49 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
         sub  <- detect_ftir_subtype(group_files)
         type <- if (!is.na(sub)) sub else ftir_override
         if (is.na(type)) {
-          results[[folder_path]] <- list(
-            status = "error",
-            msg    = paste("FTIR type unclear.",
-                           "Add 'Spotlight' or 'Lumos' to the folder or file name."),
-            folder = folder_path, n_files = length(group_files)
-          )
+          for (f in group_files) {
+            done <- done + 1L
+            results[[f]] <- list(
+              status = "error",
+              msg    = paste("FTIR type unclear.",
+                             "Add 'Spotlight' or 'Lumos' to the folder or file name."),
+              type   = "ftir", folder = folder_path, n_files = 1L
+            )
+          }
+          incProgress(length(group_files) / total_files,
+                      detail = sprintf("%d / %d", done, total_files))
           next
         }
       }
 
-      type_label <- switch(type,
-        "raman"          = "raman",
-        "ldir"           = "ldir",
-        "ftir_spotlight" = "ftir_spotlight",
-        "ftir_lumos"     = "ftir_lumos",
-        type
-      )
-      base_name <- tools::file_path_sans_ext(basename(group_files[[1L]]))
-      out_file <- file.path(folder_path,
-                            paste0(base_name, "_processed.xlsx"))
+      # ---- Process each file individually ----
+      for (f in group_files) {
+        done    <- done + 1L
+        out_file <- file.path(folder_path,
+                              paste0(tools::file_path_sans_ext(basename(f)),
+                                     "_processed.xlsx"))
+        incProgress(1 / total_files,
+                    detail = sprintf("%d / %d: %s", done, total_files, basename(f)))
 
-      res <- tryCatch({
-        if (type == "raman") {
-          write_output_workbook_raman(group_files, out_file, hqi_cutoff = hqi_cutoff)
-        } else if (type == "ldir") {
-          write_output_workbook_ldir(group_files, out_file)
-        } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
-          write_output_workbook_ftir(group_files, out_file)
-        } else {
-          stop("Unknown instrument type: ", type)
-        }
-        list(status = "ok",    path = out_file, type = type,
-             folder = folder_path, n_files = length(group_files))
-      }, error = function(e) {
-        list(status = "error", msg  = conditionMessage(e), type = type,
-             folder = folder_path, n_files = length(group_files))
-      })
+        res <- tryCatch({
+          if (type == "raman") {
+            write_output_workbook_raman(f, out_file, hqi_cutoff = hqi_cutoff)
+          } else if (type == "ldir") {
+            write_output_workbook_ldir(f, out_file)
+          } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
+            write_output_workbook_ftir(f, out_file)
+          } else {
+            stop("Unknown instrument type: ", type)
+          }
+          list(status = "ok",    path = out_file, type = type,
+               folder = folder_path, n_files = 1L)
+        }, error = function(e) {
+          list(status = "error", msg  = conditionMessage(e), type = type,
+               folder = folder_path, n_files = 1L)
+        })
 
-      results[[folder_path]] <- res
+        results[[f]] <- res
+      }
     }
 
     setProgress(1, detail = "Done.")
