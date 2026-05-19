@@ -15,7 +15,15 @@ for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     install.packages(pkg, dependencies = TRUE)
   }
-  library(pkg, character.only = TRUE)
+  # Try loading; if it fails (e.g. stale Rcpp cache after an Rcpp update),
+  # reinstall and try once more before giving up.
+  loaded <- tryCatch({ library(pkg, character.only = TRUE); TRUE },
+                     error = function(e) FALSE)
+  if (!loaded) {
+    message("Reinstalling '", pkg, "' to resolve load error (stale Rcpp cache)…")
+    install.packages(pkg, dependencies = TRUE, quiet = TRUE)
+    library(pkg, character.only = TRUE)
+  }
 }
 
 # ---------------------------
