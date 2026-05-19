@@ -1668,7 +1668,7 @@ server <- function(input, output, session) {
                   width    = "100%"),
       tags$small(class = "text-muted", uiOutput("preview_file_path")),
       br(),
-      tableOutput("preview_table"),
+      div(style = "overflow-x: auto;", tableOutput("preview_table")),
       footer   = modalButton("Close"),
       size     = "l",
       easyClose = TRUE
