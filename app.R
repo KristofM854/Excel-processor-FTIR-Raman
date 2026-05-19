@@ -1209,6 +1209,26 @@ shorten_path <- function(p, n = 2L) {
   if (length(parts) <= n) p else paste(tail(parts, n), collapse = "/")
 }
 
+preview_file <- function(path, n = 10L) {
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("xlsx", "xls")) {
+    tryCatch(
+      readxl::read_excel(path, sheet = 2, n_max = n),
+      error = function(e)
+        tryCatch(readxl::read_excel(path, sheet = 1, n_max = n), error = function(e2) NULL)
+    )
+  } else {
+    first_line <- tryCatch(readLines(path, n = 1L, warn = FALSE), error = function(e) "")
+    delim <- if (length(first_line) > 0 && grepl(";", first_line, fixed = TRUE) &&
+                 !grepl(",", first_line, fixed = TRUE)) ";" else ","
+    tryCatch(
+      readr::read_delim(path, delim = delim, n_max = n, show_col_types = FALSE,
+                        locale = readr::locale(encoding = "Latin1"), progress = FALSE),
+      error = function(e) NULL
+    )
+  }
+}
+
 # ---------------------------
 # Multi-folder processing helper
 # ---------------------------
@@ -1306,12 +1326,7 @@ ui <- fluidPage(
 
       # 1. Add files
       h5("1. Add files"),
-      shinyFilesButton(
-        id    = "files",
-        label = "Choose files (CSV / XLSX)",
-        title = "Select data files to add to the processing queue",
-        multiple = TRUE
-      ),
+      uiOutput("file_picker_btn"),
       div(class = "text-muted", style = "font-size:11px; margin-top:4px;",
           "Raman: .csv  •  FTIR: .csv  •  LDIR: .xlsx"),
       div(class = "text-muted", style = "font-size:11px; margin-top:2px;",
@@ -1407,10 +1422,11 @@ server <- function(input, output, session) {
                   filetypes = c("csv", "xlsx", "xls"))
 
   # ---- Reactive state ----
-  browser_file_list    <- reactiveVal(character(0))               # accumulated queue
-  detected_type        <- reactiveVal(NA_character_)              # badge (most recent add)
+  browser_file_list     <- reactiveVal(character(0))              # accumulated queue
+  detected_type         <- reactiveVal(NA_character_)             # badge (most recent add)
   file_instrument_types <- reactiveVal(setNames(character(0), character(0)))  # path → type
-  last_folder          <- reactiveVal("")
+  file_picker_key       <- reactiveVal(0L)                        # increment to reset picker to default root
+  last_folder           <- reactiveVal("")
   out_results          <- reactiveVal(list())                     # per-folder processing results
   pending_groups_rv <- reactiveVal(NULL)          # groups awaiting FTIR modal
   pending_hqi_rv    <- reactiveVal(70)
@@ -1463,6 +1479,9 @@ server <- function(input, output, session) {
       type <- if (!is.na(sub)) sub else "ftir"
     }
     detected_type(type)
+
+    # Re-render the picker button → resets widget navigation back to the default root
+    file_picker_key(file_picker_key() + 1L)
   })
 
   # ---- Remove checked files ----
@@ -1608,7 +1627,7 @@ server <- function(input, output, session) {
       writeLines(c(
         sprintf("$f = '%s'", gsub("'", "''", folder)),
         "$w = (New-Object -Com Shell.Application).Windows() |",
-        "     Where-Object { $_.Name -eq 'File Explorer' } |",
+        "     Where-Object { $_.FullName -and $_.FullName -imatch 'explorer\\.exe$' } |",
         "     Select-Object -First 1",
         "if ($w) { $w.Navigate($f) } else { Start-Process explorer.exe $f }"
       ), ps_file)
@@ -1626,6 +1645,50 @@ server <- function(input, output, session) {
   # ====== Rendered outputs ======
 
   output$status <- renderText(status_val())
+
+  # ---- File picker button (rendered so re-render resets navigation to default root) ----
+  output$file_picker_btn <- renderUI({
+    file_picker_key()  # reactive dependency — invalidating this re-renders the widget
+    shinyFilesButton(
+      id       = "files",
+      label    = "Choose files (CSV / XLSX)",
+      title    = "Select data files to add to the processing queue",
+      multiple = TRUE
+    )
+  })
+
+  # ---- File preview modal ----
+  observeEvent(input$preview_files, {
+    files <- browser_file_list()
+    if (length(files) == 0L) return()
+    showModal(modalDialog(
+      title    = "File Preview — first 10 rows of raw data",
+      selectInput("preview_file_select", "File:",
+                  choices  = setNames(files, basename(files)),
+                  width    = "100%"),
+      tags$small(class = "text-muted", uiOutput("preview_file_path")),
+      br(),
+      tableOutput("preview_table"),
+      footer   = modalButton("Close"),
+      size     = "l",
+      easyClose = TRUE
+    ))
+  })
+
+  output$preview_file_path <- renderUI({
+    path <- input$preview_file_select
+    if (is.null(path) || !nzchar(path)) return(NULL)
+    span(path)
+  })
+
+  output$preview_table <- renderTable({
+    path <- input$preview_file_select
+    if (is.null(path) || !nzchar(path) || !file.exists(path)) return(NULL)
+    df <- tryCatch(preview_file(path), error = function(e) NULL)
+    if (is.null(df)) return(data.frame(Error = "Could not read file for preview."))
+    as.data.frame(df)
+  }, striped = TRUE, hover = TRUE, bordered = TRUE, na = "—",
+     sanitize.text.function = identity)
 
   output$instrument_label <- renderUI({
     type  <- detected_type()
@@ -1730,6 +1793,9 @@ server <- function(input, output, session) {
   output$remove_controls_ui <- renderUI({
     if (length(browser_file_list()) == 0L) return(NULL)
     tagList(br(),
+      actionButton("preview_files", "Preview",
+                   icon = icon("eye"), class = "btn-default btn-sm"),
+      " ",
       actionButton("remove_selected", "Remove checked",
                    icon = icon("trash"), class = "btn-warning btn-sm"))
   })
