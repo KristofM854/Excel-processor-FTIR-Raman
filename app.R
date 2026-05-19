@@ -2032,7 +2032,7 @@ server <- function(input, output, session) {
             "Set the Hit Quality Index cut-off (default 70&nbsp;%). ",
             "Particles whose HQI falls below this threshold are excluded ",
             "from all outputs.<br><br>",
-            "A live preview updates as you adjust the slider, showing how many ",
+            "A live preview updates as you adjust the HQI filter, showing how many ",
             "particles pass the current cut-off without re-reading the files."
           ),
           position = "right"
