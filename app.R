@@ -1237,9 +1237,10 @@ preview_file <- function(path, n = 10L) {
 run_browser_processing <- function(groups, hqi_cutoff,
                                    ftir_override = NA_character_,
                                    mode = "separate") {
-  results <- list()
+  results     <- list()
   total_files <- sum(lengths(groups))
   done        <- 0L
+  ts          <- format(Sys.time(), "%Y%m%d_%H%M%S")  # shared across all files in this run
 
   withProgress(message = "Processing files…", value = 0, {
     for (i in seq_along(groups)) {
@@ -1285,7 +1286,7 @@ run_browser_processing <- function(groups, hqi_cutoff,
       if (mode == "combined") {
         done     <- done + length(group_files)
         out_file <- file.path(folder_path,
-                              paste0(basename(folder_path), "_processed.xlsx"))
+                              paste0(basename(folder_path), "_processed_", ts, ".xlsx"))
         incProgress(length(group_files) / total_files,
                     detail = sprintf("%d / %d: %s (combined)",
                                      done, total_files, basename(folder_path)))
@@ -1299,6 +1300,9 @@ run_browser_processing <- function(groups, hqi_cutoff,
           } else {
             stop("Unknown instrument type: ", type)
           }
+          if (!file.exists(out_file))
+            stop("Output file was not created. The folder may not be writable ",
+                 "or the file is locked (e.g. open in Excel).")
           list(status = "ok",  path = out_file, type = type,
                folder = folder_path, n_files = length(group_files))
         }, error = function(e) {
@@ -1313,7 +1317,7 @@ run_browser_processing <- function(groups, hqi_cutoff,
           done    <- done + 1L
           out_file <- file.path(folder_path,
                                 paste0(tools::file_path_sans_ext(basename(f)),
-                                       "_processed.xlsx"))
+                                       "_processed_", ts, ".xlsx"))
           incProgress(1 / total_files,
                       detail = sprintf("%d / %d: %s", done, total_files, basename(f)))
           res <- tryCatch({
@@ -1326,6 +1330,9 @@ run_browser_processing <- function(groups, hqi_cutoff,
             } else {
               stop("Unknown instrument type: ", type)
             }
+            if (!file.exists(out_file))
+              stop("Output file was not created. The folder may not be writable ",
+                   "or the file is locked (e.g. open in Excel).")
             list(status = "ok",  path = out_file, type = type,
                  folder = folder_path, n_files = 1L)
           }, error = function(e) {
@@ -2100,13 +2107,13 @@ server <- function(input, output, session) {
           element  = "#process",
           intro    = paste0(
             "<b>Step 6 &mdash; Process &amp; Save</b><br><br>",
-            "Processes every file in the queue. ",
-            "Files from the <b>same folder</b> are combined into one workbook. ",
-            "Each workbook is saved as ",
-            "<code>&lt;original_file&gt;_processed.xlsx</code> ",
-            "<b>in the same folder as the source file</b> on the network drive &mdash; ",
+            "Processes every file in the queue and saves results on the network drive &mdash; ",
             "no manual download needed.<br><br>",
-            "The output workbook contains a Long Table, per-file pivot tables ",
+            "Every output filename includes a timestamp: ",
+            "<code>&lt;name&gt;_processed_20260519_143022.xlsx</code>. ",
+            "This ensures repeated runs never overwrite each other and avoids ",
+            "'Permission denied' errors when a previous result is still open in Excel.<br><br>",
+            "The workbook contains a Long Table, per-file pivot tables ",
             "(counts by polymer type and size class), a Total sheet, a Summary ",
             "sheet, and a Material Mapping sheet."
           ),
