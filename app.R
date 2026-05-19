@@ -882,7 +882,15 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   dfs     <- lapply(input_paths, read_one_csv_raman, hqi_cutoff = hqi_cutoff)
   long_df <- dplyr::bind_rows(dfs)
   mapping_df <- make_material_mapping_table(long_df, "material_raw", "material_mapped")
-  long_df <- fix_colnames_for_excel(long_df)
+
+  # Drop intermediate/duplicate columns before writing Long_Table
+  long_df_out <- long_df %>%
+    dplyr::select(-dplyr::any_of(c(
+      "material_raw", "material_mapped", "group_code",
+      "hqi_value_raw", "hqi_value",
+      "feret_max_um_raw"
+    ))) %>%
+    fix_colnames_for_excel()
 
   all_A     <- list()
   all_B     <- list()
@@ -891,8 +899,8 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   wb <- createWorkbook()
 
   addWorksheet(wb, "Long_Table")
-  safeWriteTable(wb, "Long_Table", long_df)
-  setColWidths(wb, "Long_Table", cols = 1:ncol(long_df), widths = 10)
+  safeWriteTable(wb, "Long_Table", long_df_out)
+  setColWidths(wb, "Long_Table", cols = 1:ncol(long_df_out), widths = 10)
 
   for (i in seq_along(dfs)) {
     df_one    <- dfs[[i]]
@@ -1012,6 +1020,10 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
 
 read_one_xlsx_ldir <- function(path) {
   df <- readxl::read_excel(path, sheet = 2)
+
+  # Drop phantom unnamed columns (readxl names them ...N)
+  unnamed_cols <- grep("^\\.\\.\\.\\d+$", names(df), value = TRUE)
+  if (length(unnamed_cols) > 0L) df <- dplyr::select(df, -dplyr::all_of(unnamed_cols))
 
   cn <- names(df)
 
@@ -1303,7 +1315,7 @@ ui <- fluidPage(
       div(class = "text-muted", style = "font-size:11px; margin-top:4px;",
           "Raman: .csv  •  FTIR: .csv  •  LDIR: .xlsx"),
       div(class = "text-muted", style = "font-size:11px; margin-top:2px;",
-          "Last folder: ", textOutput("last_folder_text", inline = TRUE)),
+          "Default folder: REL (vs-monaco1)"),
       br(),
 
       # 2. Detected instrument badge
@@ -1380,24 +1392,26 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
-  # ---- Drive roots (including mapped network drives) ----
-  roots <- c("Home" = normalizePath("~", winslash = "/", mustWork = TRUE))
+  # ---- Drive roots (REL first so the picker opens there by default) ----
+  roots <- character(0)
   if (.Platform$OS.type == "windows") {
+    unc <- "//vs-monaco1.iaea.org/REL"
+    if (file.exists(unc)) roots[["REL (vs-monaco1)"]] <- unc
     for (letter in LETTERS) {
       path <- paste0(letter, ":/")
       if (file.exists(path)) roots[[letter]] <- path
     }
-    unc <- "//vs-monaco1.iaea.org/REL"
-    if (file.exists(unc)) roots[["REL (vs-monaco1)"]] <- unc
   }
+  roots[["Home"]] <- normalizePath("~", winslash = "/", mustWork = TRUE)
   shinyFileChoose(input, "files", roots = roots,
                   filetypes = c("csv", "xlsx", "xls"))
 
   # ---- Reactive state ----
-  browser_file_list <- reactiveVal(character(0))  # accumulated queue
-  detected_type     <- reactiveVal(NA_character_) # badge (most recent add)
-  last_folder       <- reactiveVal("")
-  out_results       <- reactiveVal(list())        # per-folder processing results
+  browser_file_list    <- reactiveVal(character(0))               # accumulated queue
+  detected_type        <- reactiveVal(NA_character_)              # badge (most recent add)
+  file_instrument_types <- reactiveVal(setNames(character(0), character(0)))  # path → type
+  last_folder          <- reactiveVal("")
+  out_results          <- reactiveVal(list())                     # per-folder processing results
   pending_groups_rv <- reactiveVal(NULL)          # groups awaiting FTIR modal
   pending_hqi_rv    <- reactiveVal(70)
   status_val        <- reactiveVal("Add files to the queue, then click Process & Save.")
@@ -1424,6 +1438,21 @@ server <- function(input, output, session) {
     browser_file_list(unique(c(browser_file_list(), new_paths)))
     last_folder(dirname(new_paths[[1L]]))
 
+    # Detect instrument type per new file and store
+    new_types <- vapply(new_paths, function(p) {
+      tryCatch({
+        t <- detect_instrument_type(p)
+        if (!is.na(t) && t == "ftir") {
+          sub <- detect_ftir_subtype(p)
+          if (!is.na(sub)) t <- sub
+        }
+        t
+      }, error = function(e) NA_character_)
+    }, character(1L), USE.NAMES = TRUE)
+    cur <- file_instrument_types()
+    cur[new_paths] <- new_types
+    file_instrument_types(cur)
+
     # Clear any stale checkbox selections
     updateCheckboxGroupInput(session, "files_to_remove", selected = character(0))
 
@@ -1441,15 +1470,18 @@ server <- function(input, output, session) {
     to_rm <- suppressWarnings(as.integer(input$files_to_remove))
     to_rm <- to_rm[!is.na(to_rm)]
     if (length(to_rm) > 0) {
-      browser_file_list(browser_file_list()[-to_rm])
+      remaining <- browser_file_list()[-to_rm]
+      browser_file_list(remaining)
+      file_instrument_types(file_instrument_types()[names(file_instrument_types()) %in% remaining])
       updateCheckboxGroupInput(session, "files_to_remove", selected = character(0))
-      if (length(browser_file_list()) == 0) detected_type(NA_character_)
+      if (length(remaining) == 0) detected_type(NA_character_)
     }
   })
 
   # ---- Clear all ----
   observeEvent(input$clear_all, {
     browser_file_list(character(0))
+    file_instrument_types(setNames(character(0), character(0)))
     detected_type(NA_character_)
     out_results(list())
     status_val("Queue cleared.")
@@ -1570,20 +1602,30 @@ server <- function(input, output, session) {
     folder <- input$folder_to_open
     if (is.null(folder) || !nzchar(folder)) return()
     folder <- normalizePath(folder, winslash = "\\", mustWork = FALSE)
-    if (.Platform$OS.type == "windows") shell.exec(folder)
-    else if (Sys.info()[["sysname"]] == "Darwin") system2("open",     shQuote(folder))
-    else                                           system2("xdg-open", shQuote(folder))
+    if (.Platform$OS.type == "windows") {
+      # Navigate an existing Explorer window if one is open; otherwise open new.
+      ps_file <- tempfile(fileext = ".ps1")
+      writeLines(c(
+        sprintf("$f = '%s'", gsub("'", "''", folder)),
+        "$w = (New-Object -Com Shell.Application).Windows() |",
+        "     Where-Object { $_.Name -eq 'File Explorer' } |",
+        "     Select-Object -First 1",
+        "if ($w) { $w.Navigate($f) } else { Start-Process explorer.exe $f }"
+      ), ps_file)
+      system2("powershell",
+              c("-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                "-ExecutionPolicy", "Bypass", "-File", ps_file),
+              wait = FALSE)
+    } else if (Sys.info()[["sysname"]] == "Darwin") {
+      system2("open", shQuote(folder))
+    } else {
+      system2("xdg-open", shQuote(folder))
+    }
   })
 
   # ====== Rendered outputs ======
 
   output$status <- renderText(status_val())
-
-  output$last_folder_text <- renderText({
-    f <- last_folder()
-    if (!nzchar(f)) return("—")
-    shorten_path(f, n = 2L)
-  })
 
   output$instrument_label <- renderUI({
     type  <- detected_type()
@@ -1648,14 +1690,39 @@ server <- function(input, output, session) {
       return(div(class = "text-muted", style = "padding:8px 0;",
                  "No files queued yet. Use the file picker above."))
     }
-    labels <- paste0(
-      basename(files), "  (",
-      vapply(dirname(files), shorten_path, character(1L), n = 2L), ")"
-    )
+    types <- file_instrument_types()
+
+    badge_for_type <- function(t) {
+      if (is.na(t) || !nzchar(t))
+        return(span(class = "label label-danger",
+                    style = "font-size:9px; margin-right:5px; vertical-align:middle;", "?"))
+      info <- switch(t,
+        "raman"          = list(cls = "success", txt = "Raman"),
+        "ldir"           = list(cls = "success", txt = "LDIR"),
+        "ftir_spotlight" = list(cls = "success", txt = "Spotlight"),
+        "ftir_lumos"     = list(cls = "success", txt = "Lumos"),
+        "ftir"           = list(cls = "warning", txt = "FTIR"),
+                           list(cls = "danger",  txt = "?")
+      )
+      span(class = paste0("label label-", info$cls),
+           style = "font-size:9px; margin-right:5px; vertical-align:middle;",
+           info$txt)
+    }
+
+    choice_labels <- lapply(files, function(f) {
+      t <- if (f %in% names(types)) types[[f]] else NA_character_
+      tagList(
+        badge_for_type(t),
+        basename(f),
+        tags$small(class = "text-muted",
+                   paste0("  (", shorten_path(dirname(f), n = 2L), ")"))
+      )
+    })
+
     checkboxGroupInput(
       inputId      = "files_to_remove",
       label        = NULL,
-      choiceNames  = as.list(labels),
+      choiceNames  = choice_labels,
       choiceValues = as.list(as.character(seq_along(files)))
     )
   })
