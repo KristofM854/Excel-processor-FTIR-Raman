@@ -1230,7 +1230,16 @@ ui <- fluidPage(
 server <- function(input, output, session) {
 
   roots <- c("Home" = normalizePath("~", winslash = "/", mustWork = TRUE))
-  if (.Platform$OS.type == "windows") roots <- c(roots, "C:" = "C:/")
+  if (.Platform$OS.type == "windows") {
+    # Scan every drive letter so mapped network drives appear automatically
+    for (letter in LETTERS) {
+      path <- paste0(letter, ":/")
+      if (file.exists(path)) roots[[letter]] <- path
+    }
+    # Also expose the IAEA network share directly via UNC if reachable
+    unc <- "//vs-monaco1.iaea.org/REL"
+    if (file.exists(unc)) roots[["REL (vs-monaco1)"]] <- unc
+  }
 
   shinyFileChoose(input, "files", roots = roots, filetypes = c("csv", "xlsx", "xls"))
 
