@@ -6,7 +6,8 @@ required_pkgs <- c(
   "openxlsx",
   "stringr",
   "readr",
-  "janitor"
+  "janitor",
+  "readxl"
 )
 
 for (pkg in required_pkgs) {
@@ -327,8 +328,6 @@ ensure_cols_in_order <- function(df_wide, cols_order, id_col = "source_file") {
   df_wide[, c(id_col, known, extras), drop = FALSE]
 }
 
-
-
 parse_num_any <- function(x) {
   x_chr <- as.character(x)
   # Handle European decimal comma (e.g., "0,82")
@@ -340,7 +339,6 @@ parse_num_any <- function(x) {
   }
 }
 
-
 make_material_mapping_table <- function(df, raw_col, mapped_col) {
   mapping <- unique(df[, c(raw_col, mapped_col)])
   names(mapping) <- c("raw_material_name", "standardized_group")
@@ -350,10 +348,78 @@ make_material_mapping_table <- function(df, raw_col, mapped_col) {
 }
 
 # ---------------------------
-# FT-IR workflow (existing)
+# Instrument auto-detection
+# ---------------------------
+
+# Peek at column names of the first uploaded file and return one of:
+# "ldir", "raman", "ftir", or NA_character_ (unknown).
+detect_instrument_type <- function(paths) {
+  if (length(paths) == 0) return(NA_character_)
+  path <- paths[[1]]
+  ext  <- tolower(tools::file_ext(path))
+
+  cols <- NULL
+
+  # xlsx: read sheet 2 headers (LDIR particle data sheet)
+  if (ext %in% c("xlsx", "xls")) {
+    df_peek <- tryCatch(
+      readxl::read_excel(path, sheet = 2, n_max = 0),
+      error = function(e) NULL
+    )
+    if (!is.null(df_peek)) cols <- names(df_peek)
+  }
+
+  # CSV (or failed xlsx path): try multiple encodings and delimiters
+  if (is.null(cols)) {
+    first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
+    delim <- if (length(first_line) > 0 && grepl(";", first_line[1], fixed = TRUE)) ";" else ","
+
+    for (enc in c("UTF-8", "Latin1", "Windows-1252", "UTF-16LE")) {
+      df_peek <- tryCatch(
+        readr::read_delim(
+          path, delim = delim, n_max = 0,
+          locale = readr::locale(encoding = enc),
+          show_col_types = FALSE, progress = FALSE
+        ),
+        error = function(e) NULL
+      )
+      if (!is.null(df_peek) && length(names(df_peek)) > 0) {
+        candidate <- names(df_peek)
+        # Prefer the encoding that gives us a recognisable signature column
+        if (any(c("Eccentricity", "RamanSignal") %in% candidate) ||
+            any(grepl("Area on map", candidate, fixed = TRUE))) {
+          cols <- candidate
+          break
+        }
+        if (is.null(cols)) cols <- candidate  # keep first successful parse as fallback
+      }
+    }
+  }
+
+  if (is.null(cols) || length(cols) == 0) return(NA_character_)
+
+  # Detection order per spec
+  if ("Eccentricity" %in% cols)                      return("ldir")
+  if ("RamanSignal"  %in% cols)                      return("raman")
+  if (any(grepl("Area on map", cols, fixed = TRUE))) return("ftir")
+
+  NA_character_
+}
+
+# For FTIR files, try to disambiguate Spotlight vs Lumos from filenames.
+# Returns "ftir_spotlight", "ftir_lumos", or NA (needs modal).
+detect_ftir_subtype <- function(paths) {
+  fnames <- tolower(basename(paths))
+  if (any(grepl("spotlight", fnames, fixed = TRUE))) return("ftir_spotlight")
+  if (any(grepl("lumos",     fnames, fixed = TRUE))) return("ftir_lumos")
+  NA_character_
+}
+
+# ---------------------------
+# FT-IR workflow
 # ---------------------------
 read_one_csv_ftir <- function(path) {
-  
+
   try_read <- function(enc) {
     readr::read_csv(
       path,
@@ -361,40 +427,35 @@ read_one_csv_ftir <- function(path) {
       locale = readr::locale(encoding = enc)
     )
   }
-  
-  # NOTE: drop UTF-8-BOM (readr/ICU usually handles BOM under UTF-8)
+
   candidates <- c("UTF-8", "UTF-16LE", "UTF-16BE", "Windows-1252", "Latin1")
-  
-  dfs <- list()
+
+  dfs    <- list()
   scores <- numeric(length(candidates))
-  
+
   for (i in seq_along(candidates)) {
-    enc <- candidates[[i]]
+    enc  <- candidates[[i]]
     df_i <- tryCatch(try_read(enc), error = function(e) NULL)
-    if (is.null(df_i)) {
-      scores[i] <- -Inf
-      next
-    }
-    
-    # --- Long-term fix: normalize column names once
-    cn <- names(df_i)
+    if (is.null(df_i)) { scores[i] <- -Inf; next }
+
+    cn      <- names(df_i)
     cn_utf8 <- iconv(cn, from = "", to = "UTF-8", sub = "byte")
     names(df_i) <- cn_utf8
     cn <- cn_utf8
-    
+
     suppressWarnings({
       has_micro <- any(grepl("µ", cn, fixed = TRUE))
       has_sq    <- any(grepl("²", cn, fixed = TRUE)) || any(grepl("³", cn, fixed = TRUE))
-      has_repl  <- any(grepl("\uFFFD", cn))
+      has_repl  <- any(grepl("�", cn))
     })
-    
+
     scores[i] <- (has_micro * 10) + (has_sq * 3) - (has_repl * 100)
-    dfs[[i]] <- df_i
+    dfs[[i]]  <- df_i
   }
-  
+
   best_i <- which.max(scores)
-  df <- dfs[[best_i]]
-  
+  df     <- dfs[[best_i]]
+
   if (is.null(df) || !is.finite(scores[best_i]) || scores[best_i] < 0) {
     stop(
       "Could not read CSV headers without replacement characters. ",
@@ -402,7 +463,7 @@ read_one_csv_ftir <- function(path) {
       "Try opening the CSV in a text editor and checking encoding (UTF-16LE is common for instruments)."
     )
   }
-  
+
   cn <- names(df)
   required_exact <- c("Identifier", "Group", "Feret min [µm]", "Mass [ng]")
   missing <- setdiff(required_exact, cn)
@@ -413,19 +474,26 @@ read_one_csv_ftir <- function(path) {
       "Columns present: ", paste(cn, collapse = ", ")
     )
   }
-  
+
+  # Locate "Area on map [µm²]" flexibly to handle minor µ encoding differences
+  area_col <- cn[grepl("^Area on map", cn)]
+  if (length(area_col) == 0) {
+    stop("Missing 'Area on map [µm²]' column in FTIR file: ", basename(path))
+  }
+  area_col <- area_col[1]
+
   df <- df %>%
     dplyr::filter(stringr::str_starts(as.character(`Identifier`), "MP")) %>%
     dplyr::mutate(
-      group_raw    = stringr::str_trim(as.character(`Group`)),
-      group_mapped = standardize_group_code(group_raw),
-      # Keep ALL unique materials: only abbreviate when we have a mapped code
-      group_code   = dplyr::if_else(is.na(group_mapped) | group_mapped == "", group_raw, group_mapped),
-      feret_um     = as.numeric(`Feret min [µm]`),
-      mass_ng      = as.numeric(`Mass [ng]`),
-      source_file  = basename(path)
+      group_raw          = stringr::str_trim(as.character(`Group`)),
+      group_mapped       = standardize_group_code(group_raw),
+      group_code         = dplyr::if_else(is.na(group_mapped) | group_mapped == "", group_raw, group_mapped),
+      feret_um           = as.numeric(`Feret min [µm]`),
+      mass_ng            = as.numeric(`Mass [ng]`),
+      `CE Diameter [µm]` = sqrt(4 * as.numeric(.data[[area_col]]) / pi),
+      source_file        = basename(path)
     )
-  
+
   df
 }
 
@@ -486,11 +554,11 @@ make_pivots_ftir <- function(df_one) {
 }
 
 write_output_workbook_ftir <- function(input_paths, output_path) {
-  dfs <- lapply(input_paths, read_one_csv_ftir)
+  dfs     <- lapply(input_paths, read_one_csv_ftir)
   long_df <- dplyr::bind_rows(dfs)
 
   mapping_df <- make_material_mapping_table(long_df, "group_raw", "group_mapped")
-  long_df <- long_df %>% dplyr::select(-c(group_raw, group_mapped, group_code, feret_um, mass_ng))
+  long_df    <- long_df %>% dplyr::select(-c(group_raw, group_mapped, group_code, feret_um, mass_ng))
 
   all_A <- list()
   all_B <- list()
@@ -503,7 +571,7 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   setColWidths(wb, "Long_Table", cols = 1:min(30, ncol(long_df)), widths = 10)
 
   for (i in seq_along(dfs)) {
-    df_one <- dfs[[i]]
+    df_one    <- dfs[[i]]
     file_name <- basename(input_paths[[i]])
     sheet_name <- sanitize_sheet_name(tools::file_path_sans_ext(file_name))
 
@@ -609,14 +677,9 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
 }
 
 # ---------------------------
-# Raman workflow (new)
+# Raman workflow
 # ---------------------------
 
-# Read Raman CSV with robust encoding attempts and flexible header matching.
-# Requirements (conceptual):
-# - Material column (plastic type)
-# - Feret max [um] (size metric)
-# - HQI (quality index) for filtering
 read_one_csv_raman <- function(path, hqi_cutoff = 70) {
 
   first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
@@ -640,38 +703,32 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
   }
 
   candidates <- c("UTF-8", "UTF-16LE", "UTF-16BE", "Windows-1252", "Latin1")
-  dfs <- list()
+  dfs    <- list()
   scores <- numeric(length(candidates))
 
   for (i in seq_along(candidates)) {
-    enc <- candidates[[i]]
+    enc  <- candidates[[i]]
     df_i <- tryCatch(try_read(enc), error = function(e) NULL)
-    if (is.null(df_i)) {
-      scores[i] <- -Inf
-      next
-    }
+    if (is.null(df_i)) { scores[i] <- -Inf; next }
 
     cn <- names(df_i)
-    if (is.null(cn)) {
-      scores[i] <- -Inf
-      next
-    }
+    if (is.null(cn)) { scores[i] <- -Inf; next }
 
     cn_utf8 <- iconv(cn, from = "", to = "UTF-8", sub = "byte")
     names(df_i) <- cn_utf8
 
     suppressWarnings({
       has_micro <- any(grepl("µ", cn_utf8, fixed = TRUE)) || any(grepl("μ", cn_utf8, fixed = TRUE))
-      has_repl <- any(grepl("\uFFFD", cn_utf8))
+      has_repl  <- any(grepl("�", cn_utf8))
       has_bytes <- any(grepl("<[0-9A-Fa-f]{2}>", cn_utf8, perl = TRUE))
     })
 
     scores[i] <- (has_micro * 5) - (has_repl * 100) - (has_bytes * 20)
-    dfs[[i]] <- df_i
+    dfs[[i]]  <- df_i
   }
 
   best_i <- which.max(scores)
-  raw_df <- dfs[[best_i]]
+  raw_df  <- dfs[[best_i]]
   if (is.null(raw_df) || !is.finite(scores[best_i])) {
     stop(
       "Could not read Raman CSV reliably (encoding/header issue) for file: ", basename(path), "\n",
@@ -687,7 +744,17 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
       "Please re-export with column headers enabled."
     )
   }
-  names(raw_df) <- janitor::make_clean_names(raw_names, replace = c("µ" = "u", "μ" = "u"))
+
+  # Detect area column from raw names BEFORE janitor cleans them.
+  # Match "Area [...]" but NOT "Convex Area [...]".
+  area_raw_idx <- which(
+    grepl("^Area[[:space:]]*\\[", raw_names) &
+      !grepl("Convex", raw_names, ignore.case = TRUE)
+  )
+  cleaned_raw <- janitor::make_clean_names(raw_names, replace = c("µ" = "u", "μ" = "u"))
+  col_area    <- if (length(area_raw_idx) > 0) cleaned_raw[[area_raw_idx[1]]] else NA_character_
+
+  names(raw_df) <- cleaned_raw
 
   pick_col <- function(candidates, patterns) {
     exact_hit <- intersect(candidates, names(raw_df))
@@ -718,8 +785,8 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
   )
 
   detected_required <- c(
-    material_raw = col_material,
-    hqi_value_raw = col_hqi,
+    material_raw     = col_material,
+    hqi_value_raw    = col_hqi,
     feret_max_um_raw = col_feret
   )
   if (any(is.na(detected_required))) {
@@ -733,11 +800,11 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
 
   df <- raw_df %>%
     dplyr::mutate(
-      particle_name = if (!is.na(col_particle)) as.character(.data[[col_particle]]) else NA_character_,
-      material_raw = as.character(.data[[col_material]]),
-      hqi_value_raw = parse_num_any(.data[[col_hqi]]),
+      particle_name    = if (!is.na(col_particle)) as.character(.data[[col_particle]]) else NA_character_,
+      material_raw     = as.character(.data[[col_material]]),
+      hqi_value_raw    = parse_num_any(.data[[col_hqi]]),
       feret_max_um_raw = parse_num_any(.data[[col_feret]]),
-      source_file = basename(path)
+      source_file      = basename(path)
     )
 
   validate_schema(
@@ -748,11 +815,16 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
 
   df <- df %>%
     dplyr::mutate(
-      material_raw = stringr::str_trim(as.character(material_raw)),
-      material_mapped = standardize_group_code(material_raw),
-      group_code = dplyr::if_else(is.na(material_mapped) | material_mapped == "", "OTHER", material_mapped),
-      hqi_value = dplyr::if_else(!is.na(hqi_value_raw) & hqi_value_raw <= 1, hqi_value_raw * 100, hqi_value_raw),
-      feret_max_um = feret_max_um_raw
+      material_raw     = stringr::str_trim(as.character(material_raw)),
+      material_mapped  = standardize_group_code(material_raw),
+      group_code       = dplyr::if_else(is.na(material_mapped) | material_mapped == "", "OTHER", material_mapped),
+      hqi_value        = dplyr::if_else(!is.na(hqi_value_raw) & hqi_value_raw <= 1, hqi_value_raw * 100, hqi_value_raw),
+      feret_max_um     = feret_max_um_raw,
+      `CE Diameter [µm]` = if (!is.na(col_area)) {
+        sqrt(4 * parse_num_any(.data[[col_area]]) / pi)
+      } else {
+        NA_real_
+      }
     ) %>%
     dplyr::filter(!is.na(hqi_value) & hqi_value >= hqi_cutoff)
 
@@ -798,21 +870,21 @@ make_pivots_raman <- function(df_one, src_override = NULL) {
     dplyr::select(source_file, particle_name, material_raw, hqi_value, feret_max_um)
 
   list(
-    count_by_group = count_by_group,
-    count_by_feret = count_by_feret,
+    count_by_group        = count_by_group,
+    count_by_feret        = count_by_feret,
     unknown_materials_long = unknown_materials_long
   )
 }
 
 
 write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 70) {
-  dfs <- lapply(input_paths, read_one_csv_raman, hqi_cutoff = hqi_cutoff)
+  dfs     <- lapply(input_paths, read_one_csv_raman, hqi_cutoff = hqi_cutoff)
   long_df <- dplyr::bind_rows(dfs)
   mapping_df <- make_material_mapping_table(long_df, "material_raw", "material_mapped")
   long_df <- fix_colnames_for_excel(long_df)
 
-  all_A <- list()
-  all_B <- list()
+  all_A     <- list()
+  all_B     <- list()
   all_unknown <- list()
 
   wb <- createWorkbook()
@@ -822,8 +894,8 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   setColWidths(wb, "Long_Table", cols = 1:ncol(long_df), widths = 10)
 
   for (i in seq_along(dfs)) {
-    df_one <- dfs[[i]]
-    file_name <- basename(input_paths[[i]])
+    df_one    <- dfs[[i]]
+    file_name  <- basename(input_paths[[i]])
     sheet_name <- sanitize_sheet_name(tools::file_path_sans_ext(file_name))
 
     original <- sheet_name
@@ -834,12 +906,12 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
     }
 
     piv <- make_pivots_raman(df_one, src_override = basename(input_paths[[i]]))
-    piv$count_by_group <- fix_colnames_for_excel(piv$count_by_group)
-    piv$count_by_feret <- fix_colnames_for_excel(piv$count_by_feret)
+    piv$count_by_group         <- fix_colnames_for_excel(piv$count_by_group)
+    piv$count_by_feret         <- fix_colnames_for_excel(piv$count_by_feret)
     piv$unknown_materials_long <- fix_colnames_for_excel(piv$unknown_materials_long)
 
-    all_A[[i]] <- piv$count_by_group
-    all_B[[i]] <- piv$count_by_feret
+    all_A[[i]]       <- piv$count_by_group
+    all_B[[i]]       <- piv$count_by_feret
     all_unknown[[i]] <- piv$unknown_materials_long
 
     addWorksheet(wb, sheet_name)
@@ -857,12 +929,12 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
     setColWidths(wb, sheet_name, cols = 1:max(ncol(piv$count_by_group), ncol(piv$count_by_feret)), widths = 10)
   }
 
-  summary_A <- dplyr::bind_rows(all_A)
-  summary_B <- dplyr::bind_rows(all_B)
+  summary_A   <- dplyr::bind_rows(all_A)
+  summary_B   <- dplyr::bind_rows(all_B)
   unknown_all <- dplyr::bind_rows(all_unknown)
 
-  summary_A <- fix_colnames_for_excel(add_total_row(summary_A, id_col = "source_file", label = "Total"))
-  summary_B <- fix_colnames_for_excel(add_total_row(summary_B, id_col = "source_file", label = "Total"))
+  summary_A   <- fix_colnames_for_excel(add_total_row(summary_A, id_col = "source_file", label = "Total"))
+  summary_B   <- fix_colnames_for_excel(add_total_row(summary_B, id_col = "source_file", label = "Total"))
   unknown_all <- fix_colnames_for_excel(unknown_all)
 
   addWorksheet(wb, "Total")
@@ -915,11 +987,11 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   setColWidths(wb, "Unknown_Materials", cols = 1:ncol(unknown_all), widths = 10)
 
   preflight <- dplyr::bind_rows(
-    preflight_table(long_df, "Long_Table"),
-    preflight_table(summary_A, "Total_A"),
-    preflight_table(summary_B, "Total_B"),
-    preflight_table(mean_A, "Summary_A"),
-    preflight_table(mean_B, "Summary_B"),
+    preflight_table(long_df,    "Long_Table"),
+    preflight_table(summary_A,  "Total_A"),
+    preflight_table(summary_B,  "Total_B"),
+    preflight_table(mean_A,     "Summary_A"),
+    preflight_table(mean_B,     "Summary_B"),
     preflight_table(unknown_all, "Unknown_Materials")
   )
   print(preflight)
@@ -934,44 +1006,212 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
 
 
 # ---------------------------
+# LDIR workflow
+# ---------------------------
+
+read_one_xlsx_ldir <- function(path) {
+  df <- readxl::read_excel(path, sheet = 2)
+
+  cn <- names(df)
+
+  required_cols <- c("Eccentricity", "Is Valid", "Match Type", "Id")
+  missing <- setdiff(required_cols, cn)
+  if (length(missing) > 0) {
+    stop(
+      "Missing required columns in LDIR file: ", basename(path), "\n",
+      "Missing: ", paste(missing, collapse = ", "), "\n",
+      "Columns present: ", paste(cn, collapse = ", ")
+    )
+  }
+
+  # Locate area column: "Area (µm²)" — parentheses notation, flexible µ encoding
+  area_col <- cn[grepl("^Area[[:space:]]*\\(", cn)]
+  if (length(area_col) == 0) {
+    stop("Missing 'Area (µm²)' column in LDIR file: ", basename(path))
+  }
+  area_col <- area_col[1]
+
+  df <- df %>%
+    dplyr::mutate(
+      material_raw       = stringr::str_trim(as.character(`Match Type`)),
+      material_mapped    = standardize_group_code(material_raw),
+      group_code         = dplyr::if_else(is.na(material_mapped) | material_mapped == "", "OTHER", material_mapped),
+      `CE Diameter [µm]` = sqrt(4 * as.numeric(.data[[area_col]]) / pi),
+      source_file        = basename(path)
+    )
+
+  df
+}
+
+make_pivots_ldir <- function(df_one, src_override = NULL) {
+  src <- src_override
+  if (is.null(src)) {
+    src <- if ("source_file" %in% names(df_one) && nrow(df_one) > 0)
+      df_one$source_file[[1]] else "Unknown"
+  }
+
+  group_levels <- c(GROUP_ORDER, "OTHER")
+
+  count_by_group <- df_one %>%
+    dplyr::mutate(group_code = dplyr::if_else(is.na(group_code) | group_code == "", "OTHER", group_code)) %>%
+    dplyr::count(group_code, name = "value") %>%
+    dplyr::mutate(group_code = factor(group_code, levels = group_levels)) %>%
+    tidyr::complete(group_code = factor(group_levels, levels = group_levels), fill = list(value = 0)) %>%
+    tidyr::pivot_wider(names_from = group_code, values_from = value, values_fill = 0) %>%
+    dplyr::mutate(source_file = src, .before = 1)
+  count_by_group <- ensure_cols_in_order(count_by_group, group_levels, id_col = "source_file")
+
+  count_by_size <- df_one %>%
+    dplyr::mutate(
+      size_bin = bin_feret(`CE Diameter [µm]`),
+      size_bin = factor(size_bin, levels = FERET_BINS)
+    ) %>%
+    dplyr::count(size_bin, name = "value") %>%
+    tidyr::complete(size_bin = factor(FERET_BINS, levels = FERET_BINS), fill = list(value = 0)) %>%
+    tidyr::pivot_wider(names_from = size_bin, values_from = value, values_fill = 0) %>%
+    dplyr::mutate(source_file = src, .before = 1)
+  count_by_size <- ensure_cols_in_order(count_by_size, FERET_BINS, id_col = "source_file")
+
+  list(
+    count_by_group = count_by_group,
+    count_by_size  = count_by_size
+  )
+}
+
+write_output_workbook_ldir <- function(input_paths, output_path) {
+  dfs     <- lapply(input_paths, read_one_xlsx_ldir)
+  long_df <- dplyr::bind_rows(dfs)
+
+  mapping_df  <- make_material_mapping_table(long_df, "material_raw", "material_mapped")
+  long_df_out <- long_df %>%
+    dplyr::select(-c(material_raw, material_mapped, group_code)) %>%
+    fix_colnames_for_excel()
+
+  all_A <- list()
+  all_B <- list()
+
+  wb <- createWorkbook()
+
+  addWorksheet(wb, "Long_Table")
+  safeWriteTable(wb, "Long_Table", long_df_out)
+  setColWidths(wb, "Long_Table", cols = 1:ncol(long_df_out), widths = 10)
+
+  for (i in seq_along(dfs)) {
+    df_one    <- dfs[[i]]
+    file_name  <- basename(input_paths[[i]])
+    sheet_name <- sanitize_sheet_name(tools::file_path_sans_ext(file_name))
+
+    original <- sheet_name
+    k <- 2
+    while (sheet_name %in% names(wb)) {
+      sheet_name <- sanitize_sheet_name(paste0(original, "_", k))
+      k <- k + 1
+    }
+
+    piv <- make_pivots_ldir(df_one, src_override = basename(input_paths[[i]]))
+    piv$count_by_group <- fix_colnames_for_excel(piv$count_by_group)
+    piv$count_by_size  <- fix_colnames_for_excel(piv$count_by_size)
+
+    all_A[[i]] <- piv$count_by_group
+    all_B[[i]] <- piv$count_by_size
+
+    addWorksheet(wb, sheet_name)
+    r <- 1
+
+    writeData(wb, sheet_name, "A) Counts per polymer type", startRow = r, startCol = 1)
+    r <- r + 1
+    safeWriteTable(wb, sheet_name, piv$count_by_group, startRow = r, startCol = 1)
+    r <- r + nrow(piv$count_by_group) + 3
+
+    writeData(wb, sheet_name, "B) Counts per size class (CE Diameter)", startRow = r, startCol = 1)
+    r <- r + 1
+    safeWriteTable(wb, sheet_name, piv$count_by_size, startRow = r, startCol = 1)
+
+    setColWidths(wb, sheet_name, cols = 1:max(ncol(piv$count_by_group), ncol(piv$count_by_size)), widths = 10)
+  }
+
+  summary_A <- dplyr::bind_rows(all_A)
+  summary_B <- dplyr::bind_rows(all_B)
+
+  summary_A <- fix_colnames_for_excel(add_total_row(summary_A, id_col = "source_file", label = "Total"))
+  summary_B <- fix_colnames_for_excel(add_total_row(summary_B, id_col = "source_file", label = "Total"))
+
+  addWorksheet(wb, "Total")
+  rr <- 1
+
+  writeData(wb, "Total", "A) Counts per polymer type", startRow = rr, startCol = 1)
+  rr <- rr + 1
+  start_A <- rr
+  safeWriteTable(wb, "Total", summary_A, startRow = rr, startCol = 1)
+  row_A_total <- start_A + which(summary_A$source_file == "Total")
+  addStyle(wb, "Total", total_row_style, rows = row_A_total, cols = 1:ncol(summary_A), gridExpand = TRUE, stack = TRUE)
+  rr <- rr + nrow(summary_A) + 3
+
+  writeData(wb, "Total", "B) Counts per size class", startRow = rr, startCol = 1)
+  rr <- rr + 1
+  start_B <- rr
+  safeWriteTable(wb, "Total", summary_B, startRow = rr, startCol = 1)
+  row_B_total <- start_B + which(summary_B$source_file == "Total")
+  addStyle(wb, "Total", total_row_style, rows = row_B_total, cols = 1:ncol(summary_B), gridExpand = TRUE, stack = TRUE)
+  setColWidths(wb, "Total", cols = 1:max(ncol(summary_A), ncol(summary_B)), widths = 10)
+
+  mean_A <- summary_A %>% dplyr::filter(source_file != "Total")
+  mean_B <- summary_B %>% dplyr::filter(source_file != "Total")
+
+  mean_A <- fix_colnames_for_excel(add_mean_row(mean_A, id_col = "source_file", label = "Mean"))
+  mean_B <- fix_colnames_for_excel(add_mean_row(mean_B, id_col = "source_file", label = "Mean"))
+
+  mean_A <- fix_colnames_for_excel(dplyr::bind_rows(mean_A, summary_A %>% dplyr::filter(source_file == "Total")))
+  mean_B <- fix_colnames_for_excel(dplyr::bind_rows(mean_B, summary_B %>% dplyr::filter(source_file == "Total")))
+
+  addWorksheet(wb, "Summary")
+  r2 <- 1
+  writeData(wb, "Summary", "A) Mean counts per polymer type (across files)", startRow = r2, startCol = 1)
+  r2 <- r2 + 1
+  safeWriteTable(wb, "Summary", mean_A, startRow = r2, startCol = 1)
+  r2 <- r2 + nrow(mean_A) + 3
+
+  writeData(wb, "Summary", "B) Mean counts per size class (across files)", startRow = r2, startCol = 1)
+  r2 <- r2 + 1
+  safeWriteTable(wb, "Summary", mean_B, startRow = r2, startCol = 1)
+  setColWidths(wb, "Summary", cols = 1:max(ncol(mean_A), ncol(mean_B)), widths = 10)
+
+  addWorksheet(wb, "Material_Mapping")
+  safeWriteTable(wb, "Material_Mapping", fix_colnames_for_excel(mapping_df))
+  setColWidths(wb, "Material_Mapping", cols = 1, widths = 50)
+  setColWidths(wb, "Material_Mapping", cols = 2, widths = 20)
+
+  saveWorkbook(wb, output_path, overwrite = TRUE)
+  output_path
+}
+
+
+# ---------------------------
 # Shiny app
 # ---------------------------
 
 ui <- fluidPage(
-  titlePanel("CSV → Processed Workbook"),
+  titlePanel("Microplastic Data Processor"),
 
   sidebarLayout(
     sidebarPanel(
-      selectInput(
-        inputId = "workflow",
-        label = "Data type",
-        choices = c("FT-IR" = "ftir", "Raman" = "raman"),
-        selected = "ftir"
-      ),
-
-      conditionalPanel(
-        condition = "input.workflow == 'raman'",
-        numericInput(
-          inputId = "hqi_cutoff",
-          label = "HQI cutoff (%)",
-          value = 70,
-          min = 0,
-          max = 100,
-          step = 1
-        ),
-        tags$small("Rows with HQI below the cutoff are discarded before processing.")
-      ),
-
-      br(),
-
       shinyFilesButton(
-        id = "files",
-        label = "Choose CSV files (multi-select)",
-        title = "Select CSV files to process",
+        id    = "files",
+        label = "Choose files (CSV or XLSX)",
+        title = "Select data files to process",
         multiple = TRUE
       ),
-      tags$small("Output will be saved next to the selected files as processed_data.xlsx"),
+      tags$small("Raman: .csv • FTIR: .csv • LDIR: .xlsx"),
       br(), br(),
+
+      uiOutput("instrument_label"),
+      br(),
+
+      uiOutput("hqi_ui"),
+
+      tags$small("Output will be saved next to the selected files."),
+      br(), br(),
+
       actionButton("process", "Process & Save", class = "btn-primary"),
       br(), br(),
       strong("Status:"),
@@ -992,7 +1232,7 @@ server <- function(input, output, session) {
   roots <- c("Home" = normalizePath("~", winslash = "/", mustWork = TRUE))
   if (.Platform$OS.type == "windows") roots <- c(roots, "C:" = "C:/")
 
-  shinyFileChoose(input, "files", roots = roots, filetypes = c("csv"))
+  shinyFileChoose(input, "files", roots = roots, filetypes = c("csv", "xlsx", "xls"))
 
   selected_paths <- reactive({
     req(input$files)
@@ -1003,36 +1243,150 @@ server <- function(input, output, session) {
   output$file_table <- renderTable({
     req(selected_paths())
     data.frame(
-      File = basename(selected_paths()),
+      File   = basename(selected_paths()),
       Folder = dirname(selected_paths()),
       stringsAsFactors = FALSE
     )
   })
 
-  status_val <- reactiveVal("Select CSV files, choose FT-IR or Raman, then click Process & Save.")
+  # Holds the confirmed instrument type: "raman", "ldir", "ftir_spotlight",
+  # "ftir_lumos", "ftir" (unconfirmed), or NA.
+  detected_type <- reactiveVal(NA_character_)
+
+  # Detect instrument whenever the file selection changes
+  observeEvent(selected_paths(), {
+    detected_type(NA_character_)
+    paths <- selected_paths()
+    if (length(paths) == 0) return()
+
+    type <- tryCatch(
+      detect_instrument_type(paths),
+      error = function(e) NA_character_
+    )
+
+    if (is.na(type)) {
+      detected_type(NA_character_)
+      return()
+    }
+
+    if (type == "ftir") {
+      sub <- detect_ftir_subtype(paths)
+      if (!is.na(sub)) {
+        detected_type(sub)
+      } else {
+        detected_type("ftir")  # waiting for user confirmation
+        showModal(modalDialog(
+          title = "FTIR Instrument Type",
+          p("The filename does not indicate whether this is FTIR Spotlight or FTIR Lumos."),
+          p("Please select the correct instrument before processing:"),
+          radioButtons(
+            inputId  = "ftir_subtype_choice",
+            label    = NULL,
+            choices  = c("FTIR Spotlight" = "ftir_spotlight",
+                         "FTIR Lumos"     = "ftir_lumos"),
+            selected = "ftir_spotlight"
+          ),
+          footer    = actionButton("ftir_confirm", "Confirm", class = "btn-primary"),
+          easyClose = FALSE
+        ))
+      }
+    } else {
+      detected_type(type)
+    }
+  })
+
+  observeEvent(input$ftir_confirm, {
+    detected_type(input$ftir_subtype_choice)
+    removeModal()
+  })
+
+  output$instrument_label <- renderUI({
+    type <- detected_type()
+    paths <- if (length(selected_paths()) > 0) selected_paths() else character(0)
+
+    if (is.null(type) || is.na(type)) {
+      if (length(paths) > 0)
+        return(tags$p(tags$em("Could not detect instrument type."), style = "color:#c0392b;"))
+      return(tags$p(tags$em("No files selected."), style = "color:gray;"))
+    }
+
+    label <- switch(type,
+      "raman"          = "Raman",
+      "ldir"           = "LDIR (Agilent 8700)",
+      "ftir_spotlight" = "FTIR Spotlight",
+      "ftir_lumos"     = "FTIR Lumos",
+      "ftir"           = "FTIR (awaiting confirmation…)",
+      paste("Unknown:", type)
+    )
+    tags$p(
+      tags$strong("Detected instrument: "),
+      tags$span(label, style = "color:#2c7bb6; font-weight:bold;")
+    )
+  })
+
+  # Show HQI cutoff only for Raman
+  output$hqi_ui <- renderUI({
+    type <- detected_type()
+    if (!is.null(type) && !is.na(type) && type == "raman") {
+      tagList(
+        numericInput(
+          inputId = "hqi_cutoff",
+          label   = "HQI cutoff (%)",
+          value   = 70, min = 0, max = 100, step = 1
+        ),
+        tags$small("Rows with HQI below the cutoff are discarded before processing."),
+        br(), br()
+      )
+    }
+  })
+
+  status_val   <- reactiveVal("Select files, then click Process & Save.")
   out_path_val <- reactiveVal("")
 
-  output$status <- renderText(status_val())
+  output$status   <- renderText(status_val())
   output$out_path <- renderText(out_path_val())
 
   observeEvent(input$process, {
     req(selected_paths())
     paths <- selected_paths()
+    type  <- detected_type()
 
-    out_dir <- dirname(paths[[1]])
+    if (is.null(type) || is.na(type)) {
+      status_val("ERROR: Instrument type could not be detected. Check your file.")
+      return()
+    }
+    if (type == "ftir") {
+      status_val("Please confirm the FTIR instrument type in the dialog first.")
+      return()
+    }
+
+    type_label <- switch(type,
+      "raman"          = "raman",
+      "ldir"           = "ldir",
+      "ftir_spotlight" = "ftir_spotlight",
+      "ftir_lumos"     = "ftir_lumos",
+      type
+    )
+
+    out_dir  <- dirname(paths[[1]])
     out_file <- file.path(
       out_dir,
-      paste0("processed_data_", input$workflow, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+      paste0("processed_data_", type_label, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
     )
-    
-    status_val("Processing...")
+
+    status_val("Processing…")
     out_path_val("")
 
     tryCatch({
-      if (input$workflow == "ftir") {
-        res <- write_output_workbook_ftir(paths, out_file)
+      res <- if (type == "raman") {
+        hqi <- if (!is.null(input$hqi_cutoff)) input$hqi_cutoff else 70
+        write_output_workbook_raman(paths, out_file, hqi_cutoff = hqi)
+      } else if (type == "ldir") {
+        write_output_workbook_ldir(paths, out_file)
+      } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
+        write_output_workbook_ftir(paths, out_file)
       } else {
-        res <- write_output_workbook_raman(paths, out_file, hqi_cutoff = input$hqi_cutoff)
+        stop("Unknown instrument type: ", type)
       }
       status_val("Done.")
       out_path_val(res)
