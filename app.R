@@ -7,7 +7,8 @@ required_pkgs <- c(
   "stringr",
   "readr",
   "janitor",
-  "readxl"
+  "readxl",
+  "rintrojs"
 )
 
 for (pkg in required_pkgs) {
@@ -1318,7 +1319,14 @@ run_browser_processing <- function(groups, hqi_cutoff, ftir_override = NA_charac
 # ---------------------------
 
 ui <- fluidPage(
-  titlePanel("Microplastic Data Processor"),
+  introjsUI(),
+  titlePanel(
+    div(style = "display:flex; align-items:center; justify-content:space-between;",
+        span("Microplastic Data Processor"),
+        actionButton("tour", tagList(icon("question-circle"), " Guided tour"),
+                     class = "btn-info btn-sm",
+                     style = "font-size:12px; margin-top:-4px;"))
+  ),
 
   sidebarLayout(
     sidebarPanel(
@@ -1332,12 +1340,13 @@ ui <- fluidPage(
       div(class = "text-muted", style = "font-size:11px; margin-top:2px;",
           "Default folder: REL (vs-monaco1)"),
       tags$hr(style = "margin: 10px 0 6px;"),
-      fileInput("drop_files",
-        label       = tags$span(class = "text-muted", style = "font-size:11px;",
-                                 "Or drag & drop files here:"),
-        multiple    = TRUE,
-        accept      = c(".csv", ".xlsx", ".xls"),
-        width       = "100%"),
+      div(id = "drop_zone",
+        fileInput("drop_files",
+          label       = tags$span(class = "text-muted", style = "font-size:11px;",
+                                   "Or drag & drop files here:"),
+          multiple    = TRUE,
+          accept      = c(".csv", ".xlsx", ".xls"),
+          width       = "100%")),
       uiOutput("drop_section_ui"),
       br(),
 
@@ -1944,6 +1953,140 @@ server <- function(input, output, session) {
                         stringsAsFactors = FALSE))
     log
   }, striped = TRUE, bordered = TRUE, hover = TRUE, width = "100%")
+
+  # ---- Guided tour ----
+  observeEvent(input$tour, {
+    introjs(session, options = list(
+      steps = list(
+        list(
+          intro = paste0(
+            "<b>Welcome to the Microplastic Data Processor!</b><br><br>",
+            "This tour walks through each step of the workflow. ",
+            "Use <b>Next / Back</b> to navigate, or press <b>Esc</b> to exit at any time."
+          )
+        ),
+        list(
+          element  = "#file_picker_btn",
+          intro    = paste0(
+            "<b>Step 1a &mdash; Choose files (file picker)</b><br><br>",
+            "Click this button to open the network file browser. ",
+            "It opens by default at <b>REL (vs-monaco1)</b>. ",
+            "You can select multiple files at once (Raman <code>.csv</code>, ",
+            "FTIR <code>.csv</code>, LDIR <code>.xlsx</code>), then browse to ",
+            "another folder and keep adding more &mdash; each batch is appended to ",
+            "the queue.<br><br>",
+            "<span style='color:#3c763d;'>&#10004; Output is written ",
+            "<b>next to the original file</b> on the network drive. ",
+            "No manual download step.</span>"
+          ),
+          position = "right"
+        ),
+        list(
+          element  = "#drop_zone",
+          intro    = paste0(
+            "<b>Step 1b &mdash; Drag &amp; drop (alternative)</b><br><br>",
+            "Drag files from Windows Explorer straight onto this zone, ",
+            "or click <i>Browse</i> to pick local files.<br><br>",
+            "<span style='color:#8a6d3b;'>&#9888; Because the browser transfers ",
+            "files as anonymous copies, the app <b>cannot know the original folder path</b>. ",
+            "After processing you must click the <b>Download</b> button that appears &mdash; ",
+            "the result is <b>not</b> automatically saved next to your source file.</span>"
+          ),
+          position = "right"
+        ),
+        list(
+          element  = "#main_tabs",
+          intro    = paste0(
+            "<b>Step 2 &mdash; File queue</b><br><br>",
+            "Files added via the file picker appear here. ",
+            "Each row shows a colour-coded instrument badge detected automatically ",
+            "from the file structure and folder path:<br>",
+            "&bull; <span class='label label-success' style='font-size:10px;'>Raman</span> ",
+            "&bull; <span class='label label-success' style='font-size:10px;'>LDIR</span> ",
+            "&bull; <span class='label label-success' style='font-size:10px;'>Spotlight</span> ",
+            "&bull; <span class='label label-success' style='font-size:10px;'>Lumos</span><br><br>",
+            "Tick files and hit <b>Remove checked</b> to remove them, ",
+            "<b>Clear all</b> to empty the queue, or <b>Preview</b> to ",
+            "inspect the first 10 raw data rows of any file."
+          ),
+          position = "left"
+        ),
+        list(
+          element  = "#instrument_label",
+          intro    = paste0(
+            "<b>Step 3 &mdash; Detected instrument</b><br><br>",
+            "Shows the instrument type of the most recently added batch. ",
+            "Detection reads the file header columns:<br>",
+            "&bull; <i>Eccentricity</i> column &rarr; LDIR<br>",
+            "&bull; <i>RamanSignal</i> column &rarr; Raman<br>",
+            "&bull; <i>Area on map</i> column &rarr; FTIR<br><br>",
+            "For FTIR the folder path is also checked for <i>Spotlight</i> or ",
+            "<i>Lumos</i>. If ambiguous, a dialog will ask you to confirm."
+          ),
+          position = "right"
+        ),
+        list(
+          element  = "#hqi_ui",
+          intro    = paste0(
+            "<b>Step 4 &mdash; HQI filter <em>(Raman files only)</em></b><br><br>",
+            "Set the Hit Quality Index cut-off (default 70&nbsp;%). ",
+            "Particles whose HQI falls below this threshold are excluded ",
+            "from all outputs.<br><br>",
+            "A live preview updates as you adjust the slider, showing how many ",
+            "particles pass the current cut-off without re-reading the files."
+          ),
+          position = "right"
+        ),
+        list(
+          element  = "#process",
+          intro    = paste0(
+            "<b>Step 5 &mdash; Process &amp; Save</b><br><br>",
+            "Processes every file in the queue. ",
+            "Files from the <b>same folder</b> are combined into one workbook. ",
+            "Each workbook is saved as ",
+            "<code>&lt;original_file&gt;_processed.xlsx</code> ",
+            "<b>in the same folder as the source file</b> on the network drive &mdash; ",
+            "no manual download needed.<br><br>",
+            "The output workbook contains a Long Table, per-file pivot tables ",
+            "(counts by polymer type and size class), a Total sheet, a Summary ",
+            "sheet, and a Material Mapping sheet."
+          ),
+          position = "right"
+        ),
+        list(
+          element  = "#output_area_ui",
+          intro    = paste0(
+            "<b>Step 6 &mdash; Results</b><br><br>",
+            "After processing, each output file is listed here with a ",
+            "success or error indicator.<br><br>",
+            "Select an output from the dropdown and click ",
+            "<b>Open output folder</b> to jump straight to that folder in ",
+            "Windows Explorer. If an Explorer window is already open it will ",
+            "navigate there rather than opening a new window."
+          ),
+          position = "right"
+        ),
+        list(
+          element  = "a[data-value='Session log']",
+          intro    = paste0(
+            "<b>Step 7 &mdash; Session log</b><br><br>",
+            "A running record of every processing job in this session: ",
+            "timestamp, input source (<i>file picker</i> vs <i>drag-drop</i>), ",
+            "instrument type, number of files processed, and the output filename ",
+            "or <i>(downloaded)</i> for drag-drop jobs.<br><br>",
+            "The log resets when you close or refresh the app."
+          ),
+          position = "bottom"
+        )
+      ),
+      showProgress  = TRUE,
+      showBullets   = FALSE,
+      nextLabel     = "Next &rarr;",
+      prevLabel     = "&larr; Back",
+      doneLabel     = "Done",
+      scrollToElement = TRUE
+    ))
+  })
 }
 
 shinyApp(ui, server)
