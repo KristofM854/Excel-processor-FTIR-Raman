@@ -1,0 +1,30 @@
+Package: MicroplasticDataProcessor
+Title: FTIR, Raman and LDIR Microplastic Particle Data Processor
+Version: 0.1.0
+Authors@R:
+    person("Kristof", "Moeller",
+           email = "kristof-moeller@t-online.de",
+           role = c("aut", "cre"))
+Description: Shiny application that ingests per-particle microplastic
+    identification exports from FTIR, Raman, and LDIR microspectroscopy
+    instruments, auto-detects the instrument from the file's column
+    signature, standardizes free-text polymer names to a canonical set of
+    abbreviations, bins particles by size class, and writes a formatted
+    multi-sheet Excel workbook (per-file breakdowns, totals, summary
+    statistics, and a material name-mapping audit trail) for one file or a
+    whole folder at a time.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends:
+    R (>= 4.1.0)
+Imports:
+    dplyr,
+    janitor,
+    openxlsx,
+    readr,
+    readxl,
+    rintrojs,
+    shiny,
+    shinyFiles,
+    stringr,
+    tidyr
