@@ -1388,11 +1388,10 @@ ui <- fluidPage(
       div(id = "drop_zone",
         fileInput("drop_files",
           label       = tags$span(class = "text-muted", style = "font-size:11px;",
-                                   "Or drag & drop files here:"),
+                                   "Or drag & drop files here (added to the queue):"),
           multiple    = TRUE,
           accept      = c(".csv", ".xlsx", ".xls"),
           width       = "100%")),
-      uiOutput("drop_section_ui"),
       br(),
 
       # 2. Detected instrument badge
@@ -1421,7 +1420,8 @@ ui <- fluidPage(
       verbatimTextOutput("status"),
 
       # Output files + open-folder control
-      uiOutput("output_area_ui")
+      uiOutput("output_area_ui"),
+      uiOutput("drop_download_ui")
     ),
 
     mainPanel(
@@ -1482,8 +1482,12 @@ server <- function(input, output, session) {
   pending_hqi_rv    <- reactiveVal(70)
   pending_mode_rv   <- reactiveVal("separate")
   status_val        <- reactiveVal("Add files to the queue, then click Process & Save.")
-  drop_result_path  <- reactiveVal(NULL)
-  drop_status_val   <- reactiveVal("")
+
+  # Dropped files are uploaded as anonymous temp copies; stage them under
+  # their original names in a per-session folder so they behave like picker files.
+  drop_dir <- file.path(tempfile("drop_"), "dropped_files")
+  dir.create(drop_dir, recursive = TRUE)
+  session$onSessionEnded(function() unlink(dirname(drop_dir), recursive = TRUE))
 
   session_log <- reactiveVal(data.frame(
     Time   = character(0), Source = character(0), Type = character(0),
@@ -1498,8 +1502,7 @@ server <- function(input, output, session) {
   })
 
   # ---- Append picker selection to queue ----
-  observeEvent(selected_paths(), {
-    new_paths <- selected_paths()
+  add_to_queue <- function(new_paths) {
     if (length(new_paths) == 0) return()
 
     browser_file_list(unique(c(browser_file_list(), new_paths)))
@@ -1533,7 +1536,9 @@ server <- function(input, output, session) {
 
     # Re-render the picker button → resets widget navigation back to the default root
     file_picker_key(file_picker_key() + 1L)
-  })
+  }
+
+  observeEvent(selected_paths(), add_to_queue(selected_paths()))
 
   # ---- Remove checked files ----
   observeEvent(input$remove_selected, {
@@ -1805,7 +1810,7 @@ server <- function(input, output, session) {
     files <- browser_file_list()
     if (length(files) == 0L) {
       return(div(class = "text-muted", style = "padding:8px 0;",
-                 "No files queued yet. Use the file picker above."))
+                 "No files queued yet. Use the file picker or drop files on the zone."))
     }
     types <- file_instrument_types()
 
@@ -1888,119 +1893,56 @@ server <- function(input, output, session) {
             folder_ctrl)
   })
 
-  # ---- Drag & drop tab ----
+  # ---- Drag & drop → same queue as the file picker ----
+  observeEvent(input$drop_files, {
+    up <- input$drop_files
+    if (is.null(up) || nrow(up) == 0L) return()
 
-  drop_detected_type <- reactive({
-    req(input$drop_files)
-    paths      <- input$drop_files$datapath
-    orig_names <- input$drop_files$name
-    type <- tryCatch(detect_instrument_type(paths), error = function(e) NA_character_)
-    if (!is.na(type) && type == "ftir") {
-      sub  <- detect_ftir_subtype(orig_names)
-      type <- if (!is.na(sub)) sub else "ftir"
+    new_paths <- character(0)
+    for (i in seq_len(nrow(up))) {
+      dest <- file.path(drop_dir, up$name[[i]])
+      if (file.exists(dest)) {                       # same name dropped before
+        dest <- file.path(drop_dir, paste0(
+          tools::file_path_sans_ext(up$name[[i]]), "_", format(Sys.time(), "%H%M%S"), "_", i,
+          ".", tools::file_ext(up$name[[i]])))
+      }
+      if (file.copy(up$datapath[[i]], dest)) new_paths <- c(new_paths, dest)
     }
-    type
+    if (length(new_paths) > 0L) add_to_queue(new_paths)
   })
 
-  output$drop_section_ui <- renderUI({
-    req(input$drop_files)
-    type <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
-    info <- if (!is.null(type) && !is.na(type)) {
-      switch(type,
-        "raman"          = list(cls = "success", txt = "Raman"),
-        "ldir"           = list(cls = "success", txt = "LDIR (Agilent 8700)"),
-        "ftir_spotlight" = list(cls = "success", txt = "FTIR Spotlight"),
-        "ftir_lumos"     = list(cls = "success", txt = "FTIR Lumos"),
-        "ftir"           = list(cls = "warning", txt = "FTIR — select type"),
-                           list(cls = "danger",  txt = "Unknown")
-      )
-    } else NULL
-    tagList(
-      if (!is.null(info))
-        div(style = "margin-bottom:8px;",
-            strong("Detected: "),
-            span(class = paste0("label label-", info$cls), info$txt)),
-      if (isTRUE(type == "ftir"))
-        radioButtons("drop_ftir_type", "FTIR instrument:",
-                     choices  = c("FTIR Spotlight" = "ftir_spotlight",
-                                  "FTIR Lumos"     = "ftir_lumos"),
-                     selected = "ftir_spotlight"),
-      if (isTRUE(type == "raman"))
-        tagList(
-          numericInput("drop_hqi_cutoff", "HQI cutoff (%):",
-                       value = 70, min = 0, max = 100, step = 1),
-          tags$small(class = "text-muted", "Rows below cutoff are excluded."),
-          br()),
-      actionButton("process_drop", "Process (drag-drop)",
-                   class = "btn-primary btn-sm btn-block"),
-      br(),
-      verbatimTextOutput("drop_status"),
-      uiOutput("download_btn_ui")
-    )
+  # ---- Download of processed dropped files (they cannot be saved next to the source) ----
+  dropped_outputs <- reactive({
+    ok <- Filter(function(r) r$status == "ok" &&
+                   identical(normalizePath(dirname(r$path), winslash = "/", mustWork = FALSE),
+                             normalizePath(drop_dir, winslash = "/", mustWork = FALSE)),
+                 out_results())
+    unique(vapply(ok, function(r) r$path, character(1L)))
   })
 
-  output$drop_status <- renderText(drop_status_val())
-
-  observeEvent(input$process_drop, {
-    req(input$drop_files)
-    paths <- input$drop_files$datapath
-    type  <- tryCatch(drop_detected_type(), error = function(e) NA_character_)
-
-    if (is.null(type) || is.na(type)) {
-      drop_status_val("ERROR: Could not detect instrument type.")
-      return()
-    }
-    if (type == "ftir")
-      type <- if (!is.null(input$drop_ftir_type)) input$drop_ftir_type else "ftir_spotlight"
-
-    hqi      <- if (!is.null(input$drop_hqi_cutoff)) input$drop_hqi_cutoff else 70
-    out_file <- tempfile(fileext = ".xlsx")
-    drop_status_val("Processing…")
-    drop_result_path(NULL)
-
-    withProgress(message = "Processing (drag-drop)…", {
-      tryCatch({
-        if (type == "raman") {
-          write_output_workbook_raman(paths, out_file, hqi_cutoff = hqi)
-        } else if (type == "ldir") {
-          write_output_workbook_ldir(paths, out_file)
-        } else if (type %in% c("ftir_spotlight", "ftir_lumos")) {
-          write_output_workbook_ftir(paths, out_file)
-        } else {
-          stop("Unknown instrument type: ", type)
-        }
-        drop_result_path(out_file)
-        drop_status_val("Done! Click Download to save the workbook.")
-        session_log(dplyr::bind_rows(session_log(), data.frame(
-          Time   = format(Sys.time(), "%H:%M:%S"),
-          Source = "drag-drop",
-          Type   = type,
-          Files  = nrow(input$drop_files),
-          Status = "ok",
-          Output = "(downloaded)",
-          stringsAsFactors = FALSE
-        )))
-      }, error = function(e) {
-        drop_status_val(paste("ERROR:", conditionMessage(e)))
-      })
-    })
-  })
-
-  output$download_btn_ui <- renderUI({
-    req(drop_result_path())
-    downloadButton("drop_download", "Download output workbook",
-                   class = "btn-success")
+  output$drop_download_ui <- renderUI({
+    n <- length(dropped_outputs())
+    if (n == 0L) return(NULL)
+    tagList(br(),
+      downloadButton("drop_download",
+                     if (n == 1L) "Download dropped-file output"
+                     else sprintf("Download %d dropped-file outputs (.zip)", n),
+                     class = "btn-success btn-sm"),
+      div(class = "text-muted", style = "font-size:11px; margin-top:3px;",
+          "Dropped files have no known source folder, so their outputs are downloaded instead of saved next to the input."))
   })
 
   output$drop_download <- downloadHandler(
     filename = function() {
-      type <- tryCatch(drop_detected_type(), error = function(e) "unknown")
-      if (isTRUE(type == "ftir") && !is.null(input$drop_ftir_type))
-        type <- input$drop_ftir_type
-      base_name <- tools::file_path_sans_ext(input$drop_files$name[[1L]])
-      paste0(base_name, "_processed.xlsx")
+      p <- dropped_outputs()
+      if (length(p) == 1L) basename(p) else
+        paste0("processed_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip")
     },
-    content = function(file) file.copy(drop_result_path(), file)
+    content = function(file) {
+      p <- dropped_outputs()
+      if (length(p) == 1L) file.copy(p, file)
+      else zip::zip(file, files = basename(p), root = drop_dir, mode = "cherry-pick")
+    }
   )
 
   # ---- Session log ----
@@ -2044,11 +1986,12 @@ server <- function(input, output, session) {
           intro    = paste0(
             "<b>Step 1b &mdash; Drag &amp; drop (alternative)</b><br><br>",
             "Drag files from Windows Explorer straight onto this zone, ",
-            "or click <i>Browse</i> to pick local files.<br><br>",
+            "or click <i>Browse</i> to pick local files. Dropped files join the same queue ",
+            "and use the same Step 3 options (separate / combined).<br><br>",
             "<span style='color:#8a6d3b;'>&#9888; Because the browser transfers ",
             "files as anonymous copies, the app <b>cannot know the original folder path</b>. ",
-            "After processing you must click the <b>Download</b> button that appears &mdash; ",
-            "the result is <b>not</b> automatically saved next to your source file.</span>"
+            "Outputs for dropped files appear as a <b>Download</b> button (a .zip if there ",
+            "are several) instead of being saved next to the source.</span>"
           ),
           position = "right"
         ),
@@ -2145,9 +2088,7 @@ server <- function(input, output, session) {
           intro    = paste0(
             "<b>Step 8 &mdash; Session log</b><br><br>",
             "A running record of every processing job in this session: ",
-            "timestamp, input source (<i>file picker</i> vs <i>drag-drop</i>), ",
-            "instrument type, number of files processed, and the output filename ",
-            "or <i>(downloaded)</i> for drag-drop jobs.<br><br>",
+            "timestamp, instrument type, number of files processed, and the output filename.<br><br>",
             "The log resets when you close or refresh the app."
           ),
           position = "bottom"
