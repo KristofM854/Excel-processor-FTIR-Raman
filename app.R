@@ -1380,6 +1380,13 @@ ui <- fluidPage(
       # 1. Add files
       h5("1. Add files"),
       uiOutput("file_picker_btn"),
+      div(class = "alert alert-warning",
+          style = "font-size:12px; padding:6px 8px; margin:8px 0 4px;",
+          icon("info-circle"),
+          HTML(" <b>Note:</b> only files chosen via the file picker are saved ",
+               "automatically next to the source file. Drag &amp; dropped files ",
+               "cannot be located by the browser, so their outputs must be ",
+               "downloaded (button appears below after processing).")),
       div(class = "text-muted", style = "font-size:11px; margin-top:4px;",
           "Raman: .csv  •  FTIR: .csv  •  LDIR: .xlsx"),
       div(class = "text-muted", style = "font-size:11px; margin-top:2px;",
@@ -1877,11 +1884,13 @@ server <- function(input, output, session) {
           tags$small(if (!is.null(r$msg)) r$msg else "error"))
     })
 
-    folder_ctrl <- if (length(ok_res) > 0L) {
-      fc <- setNames(
-        vapply(ok_res, function(r) dirname(r$path), character(1L)),
-        vapply(ok_res, function(r) basename(r$path), character(1L))
-      )
+    # Folders to open: one entry per real folder; the temp folder of dropped files is skipped
+    norm <- function(p) normalizePath(p, winslash = "/", mustWork = FALSE)
+    out_dirs <- unique(vapply(ok_res, function(r) dirname(r$path), character(1L)))
+    out_dirs <- out_dirs[norm(out_dirs) != norm(drop_dir)]
+
+    folder_ctrl <- if (length(out_dirs) > 0L) {
+      fc <- setNames(out_dirs, vapply(out_dirs, shorten_path, character(1L), n = 3L))
       tagList(br(),
         selectInput("folder_to_open", NULL, choices = fc, width = "100%"),
         actionButton("open_folder", "Open output folder",
