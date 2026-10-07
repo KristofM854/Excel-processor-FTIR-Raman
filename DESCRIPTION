@@ -27,4 +27,5 @@ Imports:
     shiny,
     shinyFiles,
     stringr,
-    tidyr
+    tidyr,
+    zip
