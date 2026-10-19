@@ -46,6 +46,8 @@ unique_sheet_name <- function(x, existing) {
     suffix <- paste0("_", k)
     name   <- paste0(substr(sanitize_sheet_name(x), 1, 31 - nchar(suffix)), suffix)
     k <- k + 1L
+    if (k > 1000L)   # safety net: fail loudly instead of hanging the app
+      stop("Could not create a unique sheet name for: ", x)
   }
   name
 }
