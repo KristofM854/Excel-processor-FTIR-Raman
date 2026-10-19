@@ -37,6 +37,19 @@ sanitize_sheet_name <- function(x) {
   substr(x, 1, 31)
 }
 
+# Excel caps sheet names at 31 chars. Make `x` unique within `existing` by
+# shortening the base so the "_k" suffix survives truncation.
+unique_sheet_name <- function(x, existing) {
+  name <- sanitize_sheet_name(x)
+  k <- 2L
+  while (tolower(name) %in% tolower(existing)) {
+    suffix <- paste0("_", k)
+    name   <- paste0(substr(sanitize_sheet_name(x), 1, 31 - nchar(suffix)), suffix)
+    k <- k + 1L
+  }
+  name
+}
+
 fix_colnames_for_excel <- function(df) {
   df <- as.data.frame(df)
   nm <- names(df)
@@ -583,14 +596,7 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
   for (i in seq_along(dfs)) {
     df_one    <- dfs[[i]]
     file_name <- basename(input_paths[[i]])
-    sheet_name <- sanitize_sheet_name(tools::file_path_sans_ext(file_name))
-
-    original <- sheet_name
-    k <- 2
-    while (sheet_name %in% names(wb)) {
-      sheet_name <- sanitize_sheet_name(paste0(original, "_", k))
-      k <- k + 1
-    }
+    sheet_name <- unique_sheet_name(tools::file_path_sans_ext(file_name), names(wb))
 
     piv <- make_pivots_ftir(df_one)
 
@@ -923,14 +929,7 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   for (i in seq_along(dfs)) {
     df_one    <- dfs[[i]]
     file_name  <- basename(input_paths[[i]])
-    sheet_name <- sanitize_sheet_name(tools::file_path_sans_ext(file_name))
-
-    original <- sheet_name
-    k <- 2
-    while (sheet_name %in% names(wb)) {
-      sheet_name <- sanitize_sheet_name(paste0(original, "_", k))
-      k <- k + 1
-    }
+    sheet_name <- unique_sheet_name(tools::file_path_sans_ext(file_name), names(wb))
 
     piv <- make_pivots_raman(df_one, src_override = basename(input_paths[[i]]))
     piv$count_by_group         <- fix_colnames_for_excel(piv$count_by_group)
@@ -1133,14 +1132,7 @@ write_output_workbook_ldir <- function(input_paths, output_path) {
   for (i in seq_along(dfs)) {
     df_one    <- dfs[[i]]
     file_name  <- basename(input_paths[[i]])
-    sheet_name <- sanitize_sheet_name(tools::file_path_sans_ext(file_name))
-
-    original <- sheet_name
-    k <- 2
-    while (sheet_name %in% names(wb)) {
-      sheet_name <- sanitize_sheet_name(paste0(original, "_", k))
-      k <- k + 1
-    }
+    sheet_name <- unique_sheet_name(tools::file_path_sans_ext(file_name), names(wb))
 
     piv <- make_pivots_ldir(df_one, src_override = basename(input_paths[[i]]))
     piv$count_by_group <- fix_colnames_for_excel(piv$count_by_group)
