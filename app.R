@@ -735,6 +735,7 @@ read_one_csv_raman <- function(path, hqi_cutoff = 70) {
 
     scores[i] <- (has_micro * 5) - (has_repl * 100) - (has_bytes * 20)
     dfs[[i]]  <- df_i
+    if (scores[i] >= 5) break   # best possible score; later encodings cannot beat it
   }
 
   best_i <- which.max(scores)
@@ -888,7 +889,14 @@ make_pivots_raman <- function(df_one, src_override = NULL) {
 
 
 write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 70) {
-  dfs     <- lapply(input_paths, read_one_csv_raman, hqi_cutoff = hqi_cutoff)
+  t0   <- Sys.time()
+  step <- function(...) message(sprintf("[raman %5.1fs] ", as.numeric(difftime(Sys.time(), t0, units = "secs"))), ...)
+  step("reading ", length(input_paths), " file(s)")
+  dfs     <- lapply(input_paths, function(p) {
+    d <- read_one_csv_raman(p, hqi_cutoff = hqi_cutoff)
+    step("read ", basename(p), " (", nrow(d), " rows after HQI filter)")
+    d
+  })
   long_df <- dplyr::bind_rows(dfs)
   mapping_df <- make_material_mapping_table(long_df, "material_raw", "material_mapped")
 
@@ -905,6 +913,7 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   all_B     <- list()
   all_unknown <- list()
 
+  step("writing Long_Table (", nrow(long_df_out), " rows)")
   wb <- createWorkbook()
 
   addWorksheet(wb, "Long_Table")
@@ -947,6 +956,7 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
     setColWidths(wb, sheet_name, cols = 1:max(ncol(piv$count_by_group), ncol(piv$count_by_feret)), widths = 10)
   }
 
+  step("per-file sheets done; building Total/Summary")
   summary_A   <- dplyr::bind_rows(all_A)
   summary_B   <- dplyr::bind_rows(all_B)
   unknown_all <- dplyr::bind_rows(all_unknown)
@@ -1018,7 +1028,9 @@ write_output_workbook_raman <- function(input_paths, output_path, hqi_cutoff = 7
   safeWriteTable(wb, "Log", preflight)
   setColWidths(wb, "Log", cols = 1:ncol(preflight), widths = 10)
 
+  step("saving ", output_path)
   saveWorkbook(wb, output_path, overwrite = TRUE)
+  step("saved")
   output_path
 }
 
