@@ -1292,12 +1292,10 @@ run_browser_processing <- function(groups, hqi_cutoff,
 
       # ---- Branch: separate (one output per file) or combined (one per folder) ----
       if (mode == "combined") {
-        done     <- done + length(group_files)
         out_file <- file.path(folder_path,
                               paste0(basename(folder_path), "_processed_", ts, ".xlsx"))
-        incProgress(length(group_files) / total_files,
-                    detail = sprintf("%d / %d: %s (combined)",
-                                     done, total_files, basename(folder_path)))
+        setProgress(done / total_files,
+                    detail = sprintf("Writing combined workbook: %s", basename(folder_path)))
         res <- tryCatch({
           if (type == "raman") {
             write_output_workbook_raman(group_files, out_file, hqi_cutoff = hqi_cutoff)
@@ -1318,6 +1316,9 @@ run_browser_processing <- function(groups, hqi_cutoff,
                folder = folder_path, n_files = length(group_files))
         })
         results[[folder_path]] <- res
+        done <- done + length(group_files)
+        setProgress(done / total_files,
+                    detail = sprintf("%d / %d (combined)", done, total_files))
 
       } else {
         # Separate: one output per input file
