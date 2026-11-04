@@ -363,6 +363,76 @@ parse_num_any <- function(x) {
   }
 }
 
+# Coerce a column to numeric. Numeric input passes through untouched;
+# text input goes through parse_num_any() so "0,82" and "0.82" both work.
+to_num <- function(x) {
+  if (is.numeric(x)) return(as.numeric(x))
+  parse_num_any(x)
+}
+
+# ---------------------------
+# CSV dialect detection
+# ---------------------------
+
+# Read the first few lines of a text file regardless of its encoding.
+# NUL bytes are dropped so UTF-16 files still yield their ASCII characters,
+# which is all we need to count delimiters and decimal marks.
+peek_text_lines <- function(path, n = 20L, max_bytes = 65536L) {
+  bytes <- tryCatch(readBin(path, what = "raw", n = max_bytes), error = function(e) raw(0))
+  if (length(bytes) == 0) return(character(0))
+  bytes <- bytes[bytes != as.raw(0)]
+  txt   <- rawToChar(bytes[bytes < as.raw(128)])     # ASCII only: enough for ; , . digits
+  lines <- strsplit(txt, "\r\n|\n|\r")[[1]]
+  lines <- lines[nzchar(trimws(lines))]
+  utils::head(lines, n)
+}
+
+# Work out the field delimiter and decimal mark of a CSV export.
+# Handles both the "English" dialect (sep ",", decimal ".") and the
+# "European" dialect (sep ";", decimal ",") written e.g. by Bruker / Excel
+# on German-locale systems. Returns list(delim = ..., decimal_mark = ...).
+detect_csv_format <- function(path) {
+  lines <- peek_text_lines(path)
+  if (length(lines) == 0) return(list(delim = ",", decimal_mark = "."))
+
+  header <- lines[[1]]
+  n_semi  <- stringr::str_count(header, stringr::fixed(";"))
+  n_comma <- stringr::str_count(header, stringr::fixed(","))
+  n_tab   <- stringr::str_count(header, stringr::fixed("\t"))
+
+  delim <- if (n_tab > max(n_semi, n_comma)) {
+    "\t"
+  } else if (n_semi > 0 && n_semi >= n_comma) {
+    ";"
+  } else {
+    ","
+  }
+
+  decimal_mark <- "."
+  if (delim != ",") {
+    data_lines <- lines[-1]
+    # Ignore bracketed / quoted content such as coordinates "[280,1256]"
+    data_lines <- gsub("\\[[^]]*\\]", "", data_lines)
+    data_lines <- gsub("\"[^\"]*\"", "", data_lines)
+    fields <- unlist(strsplit(data_lines, delim, fixed = TRUE))
+    fields <- trimws(fields)
+    comma_dec <- sum(grepl("^[-+]?[0-9]*,[0-9]+$", fields))
+    dot_dec   <- sum(grepl("^[-+]?[0-9]*\\.[0-9]+$", fields))
+    if (comma_dec > dot_dec) decimal_mark <- ","
+  }
+
+  list(delim = delim, decimal_mark = decimal_mark)
+}
+
+# readr locale for a given encoding + detected CSV format.
+csv_locale <- function(enc, fmt) {
+  if (identical(fmt$decimal_mark, ",")) {
+    readr::locale(encoding = enc, decimal_mark = ",", grouping_mark = ".")
+  } else {
+    readr::locale(encoding = enc)
+  }
+}
+
 make_material_mapping_table <- function(df, raw_col, mapped_col) {
   mapping <- unique(df[, c(raw_col, mapped_col)])
   names(mapping) <- c("raw_material_name", "standardized_group")
@@ -395,14 +465,13 @@ detect_instrument_type <- function(paths) {
 
   # CSV (or failed xlsx path): try multiple encodings and delimiters
   if (is.null(cols)) {
-    first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
-    delim <- if (length(first_line) > 0 && grepl(";", first_line[1], fixed = TRUE)) ";" else ","
+    fmt <- detect_csv_format(path)
 
     for (enc in c("UTF-8", "Latin1", "Windows-1252", "UTF-16LE")) {
       df_peek <- tryCatch(
         readr::read_delim(
-          path, delim = delim, n_max = 0,
-          locale = readr::locale(encoding = enc),
+          path, delim = fmt$delim, n_max = 0,
+          locale = csv_locale(enc, fmt),
           show_col_types = FALSE, progress = FALSE
         ),
         error = function(e) NULL
@@ -445,11 +514,18 @@ detect_ftir_subtype <- function(paths) {
 # ---------------------------
 read_one_csv_ftir <- function(path) {
 
+  # Bruker exports come either as "," separated with "." decimals or as
+  # ";" separated with "," decimals depending on the PC's regional settings.
+  fmt <- detect_csv_format(path)
+
   try_read <- function(enc) {
-    readr::read_csv(
+    readr::read_delim(
       path,
+      delim = fmt$delim,
       show_col_types = FALSE,
-      locale = readr::locale(encoding = enc)
+      locale = csv_locale(enc, fmt),
+      progress = FALSE,
+      trim_ws = TRUE
     )
   }
 
@@ -513,9 +589,9 @@ read_one_csv_ftir <- function(path) {
       group_raw          = stringr::str_trim(as.character(`Group`)),
       group_mapped       = standardize_group_code(group_raw),
       group_code         = dplyr::if_else(is.na(group_mapped) | group_mapped == "", group_raw, group_mapped),
-      feret_um           = as.numeric(`Feret min [µm]`),
-      mass_ng            = as.numeric(`Mass [ng]`),
-      `CE Diameter [µm]` = sqrt(4 * as.numeric(.data[[area_col]]) / pi),
+      feret_um           = to_num(`Feret min [µm]`),
+      mass_ng            = to_num(`Mass [ng]`),
+      `CE Diameter [µm]` = sqrt(4 * to_num(.data[[area_col]]) / pi),
       source_file        = basename(path)
     )
 
@@ -700,21 +776,14 @@ write_output_workbook_ftir <- function(input_paths, output_path) {
 
 read_one_csv_raman <- function(path, hqi_cutoff = 70) {
 
-  first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
-  delim <- if (length(first_line) && grepl(";", first_line, fixed = TRUE) && !grepl(",", first_line, fixed = TRUE)) {
-    ";"
-  } else if (length(first_line) && grepl(";", first_line, fixed = TRUE) && grepl(",", first_line, fixed = TRUE)) {
-    if (stringr::str_count(first_line, fixed(";")) >= stringr::str_count(first_line, fixed(","))) ";" else ","
-  } else {
-    ","
-  }
+  fmt <- detect_csv_format(path)
 
   try_read <- function(enc) {
     readr::read_delim(
       file = path,
-      delim = delim,
+      delim = fmt$delim,
       show_col_types = FALSE,
-      locale = readr::locale(encoding = enc),
+      locale = csv_locale(enc, fmt),
       progress = FALSE,
       trim_ws = TRUE
     )
@@ -1233,12 +1302,10 @@ preview_file <- function(path, n = 10L) {
         tryCatch(readxl::read_excel(path, sheet = 1, n_max = n), error = function(e2) NULL)
     )
   } else {
-    first_line <- tryCatch(readLines(path, n = 1L, warn = FALSE), error = function(e) "")
-    delim <- if (length(first_line) > 0 && grepl(";", first_line, fixed = TRUE) &&
-                 !grepl(",", first_line, fixed = TRUE)) ";" else ","
+    fmt <- detect_csv_format(path)
     tryCatch(
-      readr::read_delim(path, delim = delim, n_max = n, show_col_types = FALSE,
-                        locale = readr::locale(encoding = "Latin1"), progress = FALSE),
+      readr::read_delim(path, delim = fmt$delim, n_max = n, show_col_types = FALSE,
+                        locale = csv_locale("Latin1", fmt), progress = FALSE),
       error = function(e) NULL
     )
   }
