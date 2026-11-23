@@ -1,0 +1,4 @@
+app.R export-subst
+# Keep Windows (CRLF) line endings in the repository itself, so a raw download
+# from GitHub is a working .bat file.
+*.bat -text

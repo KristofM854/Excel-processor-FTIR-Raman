@@ -30,12 +30,40 @@ shape and with inconsistent material naming. This app:
 The interface handles multi-file batches via drag-and-drop or a folder
 picker, shows a live processing log, and includes a guided in-app tour.
 
-## Running it
+## For users
+
+You only need [R](https://cran.r-project.org/bin/windows/base/) installed
+(ask IT if it isn't), plus an internet connection.
+
+**One-time setup:** download
+[`Start Microplastic Processor.bat`](https://github.com/KristofM854/Excel-processor-FTIR-Raman/raw/main/Start%20Microplastic%20Processor.bat)
+and copy it to your desktop.
+
+**Every day:** double-click it. A black window opens and the app starts in
+your browser. Keep the black window open while you work, and close it when
+you're done.
+
+**Updates happen automatically every time you start it.** The launcher
+always downloads the latest version, so there is nothing to install or
+replace. The version you are running (date and code) is shown next to the
+app title.
+
+The first start can take a few minutes because R installs the packages the
+app needs. Later starts are quick. If R is missing or GitHub can't be
+reached, the window says so.
+
+## Running it (developers)
 
 ```r
 # Installs any missing packages automatically on first run
 shiny::runApp("app.R")
+
+# Or exactly what the desktop launcher does (latest version on main):
+shiny::runGitHub("excel-processor-ftir-raman", "KristofM854", ref = "main", launch.browser = TRUE)
 ```
+
+Whatever is merged to `main` reaches every user the next time they start the
+launcher, so only merge versions that are ready to use.
 
 Requires `shiny`, `shinyFiles`, `dplyr`, `tidyr`, `openxlsx`, `stringr`,
 `readr`, `janitor`, `readxl`, `rintrojs`. `app.R` installs whichever of
