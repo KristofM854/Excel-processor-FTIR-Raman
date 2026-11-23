@@ -52,6 +52,27 @@ The first start can take a few minutes because R installs the packages the
 app needs. Later starts are quick. If R is missing or GitHub can't be
 reached, the window says so.
 
+### Work PCs: "This program is blocked by group policy"
+
+Many managed PCs don't allow `.bat` files (AppLocker), so the black window
+just flashes and closes. Use a desktop shortcut instead. It starts R
+directly, which is allowed, and it also updates automatically.
+
+**One-time setup:**
+
+1. Open **R** from the Start menu (or RStudio).
+2. Paste this line and press Enter:
+   ```r
+   source("https://raw.githubusercontent.com/KristofM854/excel-processor-ftir-raman/main/launcher.R")
+   ```
+   It installs what is needed and copies the shortcut text to your clipboard.
+3. Right-click an empty spot on the desktop → **New** → **Shortcut**, paste
+   (Ctrl+V) into the location field, click **Next**, name it
+   "Microplastic Processor" and click **Finish**.
+
+**Every day:** double-click the shortcut. Everything else works as described
+above.
+
 ## Running it (developers)
 
 ```r
