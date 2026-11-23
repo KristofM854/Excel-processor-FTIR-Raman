@@ -9,7 +9,7 @@ APP_VERSION <- local({
   stamp <- "$Format:%cs (%h)$"
   if (!startsWith(stamp, "$Format")) return(stamp)
   git_ver <- tryCatch(
-    suppressWarnings(system2("git", c("log", "-1", "--format=%cs (%h)"),
+    suppressWarnings(system2("git", c("log", "-1", shQuote("--format=%cs (%h)")),
                              stdout = TRUE, stderr = FALSE)),
     error = function(e) character(0)
   )
