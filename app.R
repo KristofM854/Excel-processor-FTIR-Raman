@@ -1,3 +1,28 @@
+# ---------------------------
+# App version
+# ---------------------------
+# When the app is downloaded from GitHub (shiny::runGitHub, or any GitHub
+# archive), GitHub fills in the placeholder below with the date and short hash
+# of the commit that was downloaded (see .gitattributes: export-subst).
+# In a git checkout we ask git; otherwise it is a local/development copy.
+APP_VERSION <- local({
+  stamp <- "$Format:%cs (%h)$"
+  if (!startsWith(stamp, "$Format")) return(stamp)
+  git_ver <- tryCatch(
+    suppressWarnings(system2("git", c("log", "-1", "--format=%cs (%h)"),
+                             stdout = TRUE, stderr = FALSE)),
+    error = function(e) character(0)
+  )
+  if (length(git_ver) == 1L && grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}", git_ver)) {
+    paste(git_ver, "local")
+  } else {
+    "development copy"
+  }
+})
+
+# ---------------------------
+# Packages
+# ---------------------------
 required_pkgs <- c(
   "shiny",
   "shinyFiles",
@@ -11,9 +36,28 @@ required_pkgs <- c(
   "rintrojs"
 )
 
+# Make sure install.packages() works when the app is started non-interactively
+# (Rscript / the desktop launcher / runGitHub from a temp folder):
+#  - a CRAN mirror must be set, otherwise R stops with "trying to use CRAN
+#    without setting a mirror";
+#  - R's own library (C:/Program Files/R/...) is usually read-only, so use the
+#    per-user library and create it if it does not exist yet.
+if (is.null(getOption("repos")) || identical(unname(getOption("repos")["CRAN"]), "@CRAN@")) {
+  options(repos = c(CRAN = "https://cloud.r-project.org"))
+}
+local({
+  user_lib <- Sys.getenv("R_LIBS_USER")
+  if (nzchar(user_lib)) {
+    user_lib <- path.expand(strsplit(user_lib, .Platform$path.sep, fixed = TRUE)[[1]][1])
+    if (!dir.exists(user_lib)) dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+    if (dir.exists(user_lib)) .libPaths(c(user_lib, .libPaths()))
+  }
+})
+
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
-    install.packages(pkg, dependencies = TRUE)
+    message("Installing missing package '", pkg, "' (first start only)...")
+    install.packages(pkg)
   }
   # Try loading; if it fails (e.g. stale Rcpp cache after an Rcpp update),
   # reinstall and try once more before giving up.
@@ -21,7 +65,7 @@ for (pkg in required_pkgs) {
                      error = function(e) FALSE)
   if (!loaded) {
     message("Reinstalling '", pkg, "' to resolve load error (stale Rcpp cache)…")
-    install.packages(pkg, dependencies = TRUE, quiet = TRUE)
+    install.packages(pkg, quiet = TRUE)
     library(pkg, character.only = TRUE)
   }
 }
@@ -1440,8 +1484,13 @@ run_browser_processing <- function(groups, hqi_cutoff,
 ui <- fluidPage(
   introjsUI(),
   titlePanel(
-    div(style = "display:flex; align-items:center; justify-content:space-between;",
-        span("Microplastic Data Processor"),
+    windowTitle = "Microplastic Data Processor",
+    title = div(style = "display:flex; align-items:center; justify-content:space-between;",
+        span("Microplastic Data Processor",
+             tags$small(class = "text-muted",
+                        style = "font-size:12px; margin-left:8px;",
+                        title = "Version of the app that is running (date and commit of the last update)",
+                        paste("version", APP_VERSION))),
         actionButton("tour", tagList(icon("question-circle"), " Guided tour"),
                      class = "btn-info btn-sm",
                      style = "font-size:12px; margin-top:-4px;"))
